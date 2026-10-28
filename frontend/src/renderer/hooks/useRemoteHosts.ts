@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { aoBridge } from "../lib/bridge";
 import { connectHost, connectedHosts, disconnectHost } from "../lib/host-clients";
 import { useCloudSession } from "../lib/cloud-session";
+import { publishSavedRemoteHosts } from "../lib/saved-remote-hosts";
 import { useSettings } from "./useSettings";
 import { useUiStore } from "../stores/ui-store";
 
@@ -151,5 +152,10 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; refres
 		return () => clearInterval(timer);
 	}, [enabled, cloudBaseUrl, refresh]);
 
-	return { hosts: enabled ? hosts : NO_HOSTS, listed: enabled && listed, refresh };
+	const visible = enabled ? hosts : NO_HOSTS;
+	// Searching across machines reads which saved machines exist and which are
+	// down from this snapshot, without starting connections of its own.
+	useEffect(() => publishSavedRemoteHosts(visible), [visible]);
+
+	return { hosts: visible, listed: enabled && listed, refresh };
 }
