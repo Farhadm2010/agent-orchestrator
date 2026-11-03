@@ -4638,6 +4638,7 @@ export interface components {
             problem?: string;
             /** @enum {string} */
             provider: "claude" | "codex";
+            sameLoginAs?: string;
             signedIn: boolean;
         };
         AgentAccountUsageByModel: {
