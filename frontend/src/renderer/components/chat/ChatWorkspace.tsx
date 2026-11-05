@@ -63,7 +63,7 @@ import {
 import { isShownAORender } from "../../lib/mcp-tool";
 import { cn } from "../../lib/utils";
 import { sessionBranchPresentation } from "../../lib/session-branch";
-import { annotationBody, annotationTextMatches, annotationReferenceRange, annotationDiagramBlock, highlightChatAnnotation } from "../../lib/chat-annotation-navigation";
+import { annotationBody, annotationTextMatches, annotationReferenceRange, annotationDiagramBlock, highlightChatAnnotation, revealFoldedRange } from "../../lib/chat-annotation-navigation";
 import {
 	acknowledgeChatInlineEditMutation,
 	beginChatInlineEditMutation,
@@ -4172,6 +4172,13 @@ export function Timeline({
 			const scrollerNode = scroller.current;
 			const diagram = annotationDiagramBlock(source, annotationTarget);
 			let range = annotationReferenceRange(source, annotationTarget);
+			if (range && annotationRetryCount.current < 20 && revealFoldedRange(range)) {
+				// The match was below a long message's fold, which is opening: measure
+				// once it has rendered rather than center text the fold still clips.
+				annotationRetryCount.current++;
+				setAnnotationTarget((current) => current ? { ...current } : current);
+				return;
+			}
 			if (diagram && scrollerNode) {
 				const alignDiagram = () => {
 					if (!diagram.isConnected) return;
