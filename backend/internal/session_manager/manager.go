@@ -304,6 +304,12 @@ type ReviewerTerminator interface {
 	RestoreReviewer(ctx context.Context, workerID domain.SessionID) error
 }
 
+// BranchStateRecorder persists the branch a session's worktree has checked
+// out. The session service implements it and is assembled after the manager.
+type BranchStateRecorder interface {
+	ReconcileSessionBranchState(ctx context.Context, id domain.SessionID) error
+}
+
 type runtimeController interface {
 	Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error)
 	Destroy(ctx context.Context, handle ports.RuntimeHandle) error
@@ -404,6 +410,8 @@ type Manager struct {
 	store     Store
 	// agentReadiness is late-bound by SetAgentReadiness.
 	agentReadiness ports.AgentReadinessProvider
+	// branchStates is late-bound by SetBranchStateRecorder.
+	branchStates BranchStateRecorder
 	// messenger is a sessionguard.Guard wrapping the raw messenger, so every
 	// pane write is guarded (re-read state, refuse a blocked session) without
 	// each call site re-deriving the check. Send/confirmActive use Deliver for
@@ -643,6 +651,12 @@ func (m *Manager) SetTerminalInputGate(gate TerminalInputGate) {
 // SetAgentReadiness completes daemon wiring before request handling begins.
 func (m *Manager) SetAgentReadiness(provider ports.AgentReadinessProvider) {
 	m.agentReadiness = provider
+}
+
+// SetBranchStateRecorder completes daemon wiring before request handling
+// begins. Nil skips the branch record a kill takes before teardown.
+func (m *Manager) SetBranchStateRecorder(recorder BranchStateRecorder) {
+	m.branchStates = recorder
 }
 
 // SetAgentAccounts completes daemon wiring before request handling begins.
@@ -2775,6 +2789,15 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 			return KillResult{}, m.terminateWithPreservedWorkspace(ctx, rec, refusedShellTerminalOpen, err, true)
 		}
 		releaseTerminals = release
+	}
+	// Nothing in the worktree can switch its branch any more. Record that
+	// branch before the row is terminated, because the branch observer skips
+	// terminated sessions and its 30 s tick can miss a switch the agent made
+	// just before the archive. Restore recreates the worktree on it.
+	if ws.Path != "" && !workspaceProject && m.branchStates != nil {
+		if err := m.branchStates.ReconcileSessionBranchState(ctx, id); err != nil {
+			m.logger.Warn("kill: record worktree branch failed", "sessionID", id, "error", err)
+		}
 	}
 	freed := false
 	if ws.Path != "" {
