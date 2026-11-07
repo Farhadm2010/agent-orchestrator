@@ -3592,10 +3592,15 @@ type ConversationBranchIDParam struct {
 
 // RollbackConversationRequest is the optional body of a conversation rollback.
 // RestoreFiles also puts the worktree back to how it was before the turn; a
-// client sets it only after showing the user which files will change. Without
-// it only the conversation is rolled back, which is all an older client promises.
+// client sets it only after showing the user which files will change, and sends
+// that preview's PlanID with it. Without it only the conversation is rolled
+// back, which is all an older client promises.
 type RollbackConversationRequest struct {
 	RestoreFiles bool `json:"restoreFiles,omitempty"`
+	// PlanID is the planId of the preview the user confirmed, required with
+	// RestoreFiles. If the files changed since, the rollback is refused with
+	// CHAT_ROLLBACK_FILES_CHANGED and nothing changes.
+	PlanID string `json:"planId,omitempty"`
 }
 
 // RollbackPreviewResponse says what rolling back to a turn would do to the
@@ -3612,6 +3617,9 @@ type RollbackPreviewResponse struct {
 	// CommitsSince counts commits made on the branch after the turn. A restore
 	// leaves them in place, so their changes come back as uncommitted edits.
 	CommitsSince int `json:"commitsSince"`
+	// PlanID identifies this list of files; a rollback that restores them sends it
+	// back. Empty when the files cannot be restored.
+	PlanID string `json:"planId,omitempty"`
 }
 
 // RollbackFileChange is one file a rollback would restore.

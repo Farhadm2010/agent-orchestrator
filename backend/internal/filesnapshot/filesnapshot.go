@@ -12,6 +12,8 @@ package filesnapshot
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -30,20 +32,47 @@ var (
 	ErrNotRepository = errors.New("workspace is not a git repository")
 	// ErrNotFound means nothing was recorded under the ref.
 	ErrNotFound = errors.New("file snapshot not found")
-	// ErrNestedRepository means the worktree holds another repository, such as a
-	// workspace project's child repository. A snapshot carries none of its files,
-	// so a restore would leave whatever changed there.
+	// ErrNestedRepository means the worktree holds another repository: a
+	// submodule, a repository cloned into it, or a workspace project's child
+	// repository. A snapshot records at most the commit it has checked out, never
+	// its files, so a restore would leave whatever changed inside it.
 	ErrNestedRepository = errors.New("worktree contains another git repository")
+	// ErrTooLarge means the worktree's untracked files are past what a snapshot
+	// taken before every turn may copy into the repository.
+	ErrTooLarge = errors.New("worktree is too large to snapshot")
 )
+
+// Limits on the untracked files a snapshot copies. The turn waits while they are
+// hashed, and every version of each stays in the repository's object store until
+// the session's snapshots are deleted.
+const (
+	maxUntrackedFiles     = 5000
+	maxUntrackedFileBytes = 50 << 20
+	maxUntrackedBytes     = 200 << 20
+)
+
+// snapshotsPrefix is the ref namespace holding every session's snapshots.
+const snapshotsPrefix = "refs/ao/snapshots/"
+
+// snapshotSubject starts a snapshot commit's message, followed by the worktree
+// it was taken in, so DeleteOrphans can tell when that worktree is gone.
+const snapshotSubject = "ao file snapshot of "
 
 // SessionPrefix is the ref namespace holding one session's snapshots.
 func SessionPrefix(session domain.SessionID) string {
-	return "refs/ao/snapshots/" + string(session) + "/"
+	return snapshotsPrefix + string(session) + "/"
 }
 
 // Ref names the snapshot taken before a session's turn.
 func Ref(session domain.SessionID, turnID string) string {
 	return SessionPrefix(session) + turnID
+}
+
+// BeforeRollbackRef names the record of the worktree just before a rollback
+// restored the snapshot of turnID, so what the restore overwrote stays
+// reachable instead of being left to garbage collection.
+func BeforeRollbackRef(session domain.SessionID, turnID string) string {
+	return SessionPrefix(session) + "before-rollback/" + turnID
 }
 
 // ChangeKind says what restoring a snapshot does to one path.
@@ -74,15 +103,21 @@ type state struct {
 // touching anything; Apply carries it out and Undo reverses an Apply.
 type Restore struct {
 	top     string
+	head    string
 	current state
 	target  state
 	Changes []Change
 	// CommitsSince counts commits on HEAD made after the snapshot. Restoring
 	// changes files and never history, so they stay on the branch.
 	CommitsSince int
+	// PlanID identifies this plan. It changes whenever the worktree, the index or
+	// HEAD does, so a caller can tell the files still match a list it showed.
+	PlanID string
 }
 
-// Capture records the workspace's files and points every ref at the snapshot.
+// Capture records the workspace's files and points every ref at the snapshot. It
+// refuses with ErrTooLarge, recording nothing, when the untracked files are past
+// the limits above.
 func Capture(ctx context.Context, workspace string, refs ...string) error {
 	top, err := toplevel(ctx, workspace)
 	if err != nil {
@@ -92,19 +127,34 @@ func Capture(ctx context.Context, workspace string, refs ...string) error {
 	if err != nil {
 		return err
 	}
+	if err := checkUntracked(ctx, top); err != nil {
+		return err
+	}
 	current, err := capture(ctx, top)
 	if err != nil {
 		return err
 	}
+	return record(ctx, top, head, current, refs...)
+}
+
+// Save records the worktree and index as Plan found them under ref, before Apply
+// overwrites them. `git stash apply <ref>` brings them back.
+func (r Restore) Save(ctx context.Context, ref string) error {
+	return record(ctx, r.top, r.head, r.current, ref)
+}
+
+// record writes files as a commit shaped like git stash's on top of head and
+// points every ref at it.
+func record(ctx context.Context, top, head string, files state, refs ...string) error {
 	identity := []string{
 		"GIT_AUTHOR_NAME=Agent Orchestrator", "GIT_AUTHOR_EMAIL=agent-orchestrator@localhost",
 		"GIT_COMMITTER_NAME=Agent Orchestrator", "GIT_COMMITTER_EMAIL=agent-orchestrator@localhost",
 	}
-	index, err := git(ctx, top, identity, nil, "commit-tree", current.index, "-p", head, "-m", "ao file snapshot index")
+	index, err := git(ctx, top, identity, nil, "commit-tree", files.index, "-p", head, "-m", "ao file snapshot index")
 	if err != nil {
 		return err
 	}
-	snapshot, err := git(ctx, top, identity, nil, "commit-tree", current.worktree, "-p", head, "-p", index, "-m", "ao file snapshot")
+	snapshot, err := git(ctx, top, identity, nil, "commit-tree", files.worktree, "-p", head, "-p", index, "-m", snapshotSubject+top)
 	if err != nil {
 		return err
 	}
@@ -131,7 +181,11 @@ func Plan(ctx context.Context, workspace, ref string) (Restore, error) {
 		return Restore{}, err
 	}
 	target := state{worktree: snapshot + "^{tree}", index: snapshot + "^2^{tree}"}
-	count, err := git(ctx, top, nil, nil, "rev-list", "--count", snapshot+"^1..HEAD")
+	head, err := git(ctx, top, nil, nil, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return Restore{}, err
+	}
+	count, err := git(ctx, top, nil, nil, "rev-list", "--count", snapshot+"^1.."+head)
 	if err != nil {
 		return Restore{}, err
 	}
@@ -150,14 +204,24 @@ func Plan(ctx context.Context, workspace, ref string) (Restore, error) {
 	if err != nil {
 		return Restore{}, err
 	}
-	changes, nested, err := diff(ctx, top, current.worktree, target.worktree)
+	for _, tree := range []string{current.worktree, target.worktree} {
+		nested, err := gitlink(ctx, top, tree)
+		if err != nil {
+			return Restore{}, err
+		}
+		if nested != "" {
+			return Restore{}, fmt.Errorf("%w: %s", ErrNestedRepository, nested)
+		}
+	}
+	changes, err := diff(ctx, top, current.worktree, target.worktree)
 	if err != nil {
 		return Restore{}, err
 	}
-	if nested != "" {
-		return Restore{}, fmt.Errorf("%w: %s", ErrNestedRepository, nested)
-	}
-	return Restore{top: top, current: current, target: target, Changes: changes, CommitsSince: commitsSince}, nil
+	id := sha256.Sum256([]byte(strings.Join([]string{snapshot, head, current.worktree, current.index}, "\n")))
+	return Restore{
+		top: top, head: head, current: current, target: target,
+		Changes: changes, CommitsSince: commitsSince, PlanID: hex.EncodeToString(id[:16]),
+	}, nil
 }
 
 // Apply writes the snapshot's files and index entries for every planned change.
@@ -194,6 +258,57 @@ func DeleteAll(ctx context.Context, repo, prefix string) error {
 	}
 	_, err = git(ctx, repo, nil, strings.NewReader(listed+"\n"), "update-ref", "--stdin")
 	return err
+}
+
+// DeleteOrphans removes the snapshots of every session in repo whose worktree is
+// gone, however the session ended. A session keeps its snapshots while any of
+// them was taken in one of worktrees, the paths of repo's registered worktrees,
+// or when a snapshot does not say where it was taken.
+func DeleteOrphans(ctx context.Context, repo string, worktrees []string) error {
+	listed, err := git(ctx, repo, nil, nil, "for-each-ref", "--format=%(refname)%00%(subject)", snapshotsPrefix)
+	if err != nil || listed == "" {
+		return err
+	}
+	var live []os.FileInfo
+	for _, path := range worktrees {
+		if info, err := os.Stat(path); err == nil {
+			live = append(live, info)
+		}
+	}
+	keep := map[string]bool{}
+	var sessions []string
+	for _, line := range strings.Split(listed, "\n") {
+		ref, subject, _ := strings.Cut(line, "\x00")
+		session, _, _ := strings.Cut(strings.TrimPrefix(ref, snapshotsPrefix), "/")
+		if _, seen := keep[session]; !seen {
+			sessions = append(sessions, session)
+		}
+		path, ok := strings.CutPrefix(subject, snapshotSubject)
+		keep[session] = keep[session] || !ok || isAny(path, live)
+	}
+	for _, session := range sessions {
+		if keep[session] {
+			continue
+		}
+		if err := DeleteAll(ctx, repo, SessionPrefix(domain.SessionID(session))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isAny reports whether path is one of the files described by infos.
+func isAny(path string, infos []os.FileInfo) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	for _, candidate := range infos {
+		if os.SameFile(info, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // write makes the worktree and index match to for the given paths: removals
@@ -306,13 +421,60 @@ func ignoredRepository(ctx context.Context, top string) (string, error) {
 	return "", nil
 }
 
-// diff lists what moving the worktree from tree from to tree to changes. A
-// nested repository that changed is named instead of listed: a restore never
-// rewrites one.
-func diff(ctx context.Context, top, from, to string) ([]Change, string, error) {
+// gitlink names a submodule or nested repository recorded in tree, if any. git
+// add records one only as the commit it has checked out, so edits inside it are
+// invisible to a snapshot whether or not that commit changed.
+func gitlink(ctx context.Context, top, tree string) (string, error) {
+	out, err := git(ctx, top, nil, nil, "ls-tree", "-r", "-z", tree)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range strings.Split(out, "\x00") {
+		// "<mode> <type> <id>", a tab, then the path.
+		if meta, path, ok := strings.Cut(entry, "\t"); ok && strings.HasPrefix(meta, "160000 ") {
+			return path, nil
+		}
+	}
+	return "", nil
+}
+
+// checkUntracked refuses a worktree whose untracked files are too many or too
+// large to copy into the object store before every turn.
+func checkUntracked(ctx context.Context, top string) error {
+	out, err := git(ctx, top, nil, nil, "ls-files", "-z", "--others", "--exclude-standard")
+	if err != nil {
+		return err
+	}
+	var files int
+	var total int64
+	for _, path := range strings.Split(out, "\x00") {
+		if path == "" {
+			continue
+		}
+		files++
+		if files > maxUntrackedFiles {
+			return fmt.Errorf("%w: more than %d untracked files", ErrTooLarge, maxUntrackedFiles)
+		}
+		info, err := os.Lstat(filepath.Join(top, filepath.FromSlash(path)))
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if info.Size() > maxUntrackedFileBytes {
+			return fmt.Errorf("%w: %s is larger than %d MiB", ErrTooLarge, path, maxUntrackedFileBytes>>20)
+		}
+		total += info.Size()
+		if total > maxUntrackedBytes {
+			return fmt.Errorf("%w: untracked files total more than %d MiB", ErrTooLarge, maxUntrackedBytes>>20)
+		}
+	}
+	return nil
+}
+
+// diff lists what moving the worktree from tree from to tree to changes.
+func diff(ctx context.Context, top, from, to string) ([]Change, error) {
 	out, err := git(ctx, top, nil, nil, "diff-tree", "-r", "-z", "--no-renames", from, to)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	fields := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
 	var changes []Change
@@ -320,10 +482,7 @@ func diff(ctx context.Context, top, from, to string) ([]Change, string, error) {
 		// ":<old mode> <new mode> <old id> <new id> <status>", then the path.
 		meta := strings.Fields(strings.TrimPrefix(fields[i], ":"))
 		if len(meta) != 5 {
-			return nil, "", fmt.Errorf("parse git diff-tree output %q", fields[i])
-		}
-		if meta[0] == "160000" || meta[1] == "160000" {
-			return nil, fields[i+1], nil
+			return nil, fmt.Errorf("parse git diff-tree output %q", fields[i])
 		}
 		kind := ChangeReverted
 		switch meta[4] {
@@ -334,7 +493,7 @@ func diff(ctx context.Context, top, from, to string) ([]Change, string, error) {
 		}
 		changes = append(changes, Change{Path: fields[i+1], Kind: kind})
 	}
-	return changes, "", nil
+	return changes, nil
 }
 
 // removeFile deletes a file and then each parent directory it leaves empty,

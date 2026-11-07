@@ -42,7 +42,7 @@ type fakeChatService struct {
 	snapshot      chatsvc.Snapshot
 
 	gotTurnID      string
-	gotRestore     bool
+	gotFilePlanID  string
 	gotTitle       string
 	gotEditTurnID  string
 	gotEditMessage ports.ChatUserMessage
@@ -94,9 +94,9 @@ func (f *fakeChatService) SetTurnSettings(context.Context, domain.SessionID, dom
 	return domain.ConversationSettings{}, nil
 }
 
-func (f *fakeChatService) Rollback(_ context.Context, _ domain.SessionID, turnID string, restoreFiles bool) (int, error) {
+func (f *fakeChatService) Rollback(_ context.Context, _ domain.SessionID, turnID, filePlanID string) (int, error) {
 	f.gotTurnID = turnID
-	f.gotRestore = restoreFiles
+	f.gotFilePlanID = filePlanID
 	if f.rollback != nil {
 		return 0, f.rollback
 	}
@@ -246,7 +246,7 @@ func TestRollbackRouteReportsWhatWasDiscarded(t *testing.T) {
 		t.Errorf("turn id = %q, want turn-7", svc.gotTurnID)
 	}
 	// Mobile and older desktops post no body and tell their users files stay put.
-	if svc.gotRestore {
+	if svc.gotFilePlanID != "" {
 		t.Error("a rollback without a body restored files")
 	}
 	var got struct {
@@ -263,10 +263,23 @@ func TestRollbackRouteRestoresFilesOnlyWhenAsked(t *testing.T) {
 	srv := newChatTestServer(t, svc)
 
 	body, status, _ := doRequest(t, srv, "POST",
-		"/api/v1/sessions/ao-1/conversation/turns/turn-7/rollback", `{"restoreFiles":true}`)
-	if status != http.StatusOK || !svc.gotRestore {
-		t.Fatalf("status = %d, restore = %v; want 200 with files restored; body=%s", status, svc.gotRestore, body)
+		"/api/v1/sessions/ao-1/conversation/turns/turn-7/rollback", `{"restoreFiles":true,"planId":"plan-1"}`)
+	if status != http.StatusOK || svc.gotFilePlanID != "plan-1" {
+		t.Fatalf("status = %d, plan = %q; want 200 restoring plan-1; body=%s", status, svc.gotFilePlanID, body)
 	}
+
+	// A plan id alone does not ask for files back.
+	svc.gotFilePlanID = ""
+	body, status, _ = doRequest(t, srv, "POST",
+		"/api/v1/sessions/ao-1/conversation/turns/turn-7/rollback", `{"planId":"plan-1"}`)
+	if status != http.StatusOK || svc.gotFilePlanID != "" {
+		t.Fatalf("status = %d, plan = %q; want 200 without files; body=%s", status, svc.gotFilePlanID, body)
+	}
+
+	// Files are restored only against a list the user was shown.
+	body, status, _ = doRequest(t, srv, "POST",
+		"/api/v1/sessions/ao-1/conversation/turns/turn-7/rollback", `{"restoreFiles":true}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "CHAT_ROLLBACK_PLAN_REQUIRED")
 
 	body, status, _ = doRequest(t, srv, "POST",
 		"/api/v1/sessions/ao-1/conversation/turns/turn-7/rollback", `{"restoreFiles":`)
@@ -281,7 +294,7 @@ func TestRollbackPreviewRouteListsFilesUpToTheCap(t *testing.T) {
 	for i := len(changes); i < 201; i++ {
 		changes = append(changes, filesnapshot.Change{Path: fmt.Sprintf("gen/%03d.txt", i), Kind: filesnapshot.ChangeRemoved})
 	}
-	svc := &fakeChatService{preview: chatsvc.RollbackPreview{Changes: changes, CommitsSince: 2}}
+	svc := &fakeChatService{preview: chatsvc.RollbackPreview{Changes: changes, CommitsSince: 2, PlanID: "plan-1"}}
 	srv := newChatTestServer(t, svc)
 
 	body, status, headers := doRequest(t, srv, "GET",
@@ -292,9 +305,9 @@ func TestRollbackPreviewRouteListsFilesUpToTheCap(t *testing.T) {
 	}
 	var got controllers.RollbackPreviewResponse
 	mustJSON(t, body, &got)
-	if !got.FilesRestorable || got.Reason != "" || got.TotalFiles != 201 || len(got.Files) != 200 || got.CommitsSince != 2 {
-		t.Fatalf("preview = restorable %v, reason %q, %d of %d files, %d commits; want restorable, 200 of 201, 2 commits",
-			got.FilesRestorable, got.Reason, len(got.Files), got.TotalFiles, got.CommitsSince)
+	if !got.FilesRestorable || got.Reason != "" || got.TotalFiles != 201 || len(got.Files) != 200 || got.CommitsSince != 2 || got.PlanID != "plan-1" {
+		t.Fatalf("preview = restorable %v, reason %q, %d of %d files, %d commits, plan %q; want restorable, 200 of 201, 2 commits, plan-1",
+			got.FilesRestorable, got.Reason, len(got.Files), got.TotalFiles, got.CommitsSince, got.PlanID)
 	}
 	if got.Files[0] != (controllers.RollbackFileChange{Path: "a.go", Change: "reverted"}) ||
 		got.Files[1] != (controllers.RollbackFileChange{Path: "gone.go", Change: "restored"}) ||
@@ -510,6 +523,7 @@ func TestConversationHistoryRefusalsAreTypedNeverInternalErrors(t *testing.T) {
 		{"previous agent provider", chatsvc.ErrTurnProviderMismatch, http.StatusConflict, "CHAT_TURN_PROVIDER_MISMATCH"},
 		{"unsupported", chatsvc.ErrRollbackUnsupported, http.StatusConflict, "CHAT_ROLLBACK_UNSUPPORTED"},
 		{"files not restorable", fmt.Errorf("%w: no snapshot", chatsvc.ErrFilesNotRestorable), http.StatusConflict, "CHAT_ROLLBACK_FILES_UNAVAILABLE"},
+		{"files changed since the preview", chatsvc.ErrFilesChanged, http.StatusConflict, "CHAT_ROLLBACK_FILES_CHANGED"},
 		{"provider refused", fmt.Errorf("%w: no", chatsvc.ErrProviderRefused), http.StatusConflict, "CHAT_PROVIDER_REFUSED"},
 		{"no controller", chatsvc.ErrNoController, http.StatusConflict, "CHAT_CONTROLLER_NOT_READY"},
 		{"stopped before queue append", chatsvc.ErrNotProvisioning, http.StatusConflict, "CHAT_CONTROLLER_NOT_READY"},

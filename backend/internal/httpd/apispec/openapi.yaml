@@ -19654,6 +19654,8 @@ components:
       type: object
     RollbackConversationRequest:
       properties:
+        planId:
+          type: string
         restoreFiles:
           type: boolean
       type: object
@@ -19688,6 +19690,8 @@ components:
           type: array
         filesRestorable:
           type: boolean
+        planId:
+          type: string
         reason:
           type: string
         totalFiles:

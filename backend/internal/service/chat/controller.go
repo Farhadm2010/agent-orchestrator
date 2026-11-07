@@ -2736,7 +2736,8 @@ func (c *Controller) awaitTurnAcknowledged(ctx context.Context, turn string) boo
 }
 
 // Rollback discards a turn and everything after it, and reports how many turns went.
-// With restoreFiles it also puts the worktree back to how it was before the turn.
+// With filePlanID, the PlanID of the RollbackPreview the user confirmed, it also puts
+// the worktree back to how it was before the turn.
 //
 // Order is deliberate: files first, the provider second, AO's rows last. Files are
 // the only step that can be reversed, so they go before the provider call and are
@@ -2750,7 +2751,7 @@ func (c *Controller) awaitTurnAcknowledged(ctx context.Context, turn string) boo
 // The busy check is inside sendMu, which is also what dispatch holds, so a turn
 // cannot start between the check and the provider call. That is the difference
 // between refusing a rollback and racing one.
-func (c *Controller) Rollback(ctx context.Context, turnID string, restoreFiles bool) (int, error) {
+func (c *Controller) Rollback(ctx context.Context, turnID, filePlanID string) (int, error) {
 	rollbacker, ok := c.conv.(ports.ChatRollbacker)
 	if !ok {
 		return 0, ErrRollbackUnsupported
@@ -2799,17 +2800,9 @@ func (c *Controller) Rollback(ctx context.Context, turnID string, restoreFiles b
 	}
 
 	var restore filesnapshot.Restore
-	if restoreFiles {
-		var unavailable string
-		restore, unavailable, err = planFileRestore(ctx, c.workspacePath, c.sessionID, turnID)
-		if err != nil {
+	if filePlanID != "" {
+		if restore, err = c.restoreFiles(ctx, turnID, filePlanID); err != nil {
 			return 0, err
-		}
-		if unavailable != "" {
-			return 0, fmt.Errorf("%w: %s", ErrFilesNotRestorable, unavailable)
-		}
-		if err := restore.Apply(ctx); err != nil {
-			return 0, c.undoFileRestore(ctx, restore, fmt.Errorf("restore files for %s: %w", turnID, err))
 		}
 	}
 

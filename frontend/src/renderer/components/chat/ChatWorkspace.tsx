@@ -517,10 +517,11 @@ export interface ChatWorkspaceProps {
 	compactUnavailable?: string;
 	/**
 	 * Discard a turn and everything after it, restoring the worktree too when the
-	 * confirmation listed its files. Absent means the agent cannot undo, and the
-	 * affordance is not drawn at all rather than shown and then refused.
+	 * confirmation listed its files, whose preview's planId is filePlanId. Absent
+	 * means the agent cannot undo, and the affordance is not drawn at all rather
+	 * than shown and then refused.
 	 */
-	onRollback?: (turnId: string, restoreFiles: boolean) => void | Promise<unknown>;
+	onRollback?: (turnId: string, filePlanId?: string) => void | Promise<unknown>;
 	/** Lists the files a rollback would restore. Absent means only the conversation is rolled back. */
 	onPreviewRollback?: (turnId: string) => Promise<RollbackPreview>;
 	rollbackPending?: boolean;
@@ -2121,9 +2122,12 @@ function ChatWorkspaceContent({
 				busy={rollbackPending}
 				error={rollbackError}
 				onPreview={onPreviewRollback ? previewRollback : undefined}
-				onConfirm={(turnId, restoreFiles) => {
+				onConfirm={(turnId, filePlanId) => {
 					setConfirming(undefined);
-					void Promise.resolve(onRollback?.(turnId, restoreFiles)).catch(() => {});
+					void Promise.resolve(onRollback?.(turnId, filePlanId)).catch((cause: unknown) => {
+						// Files changed after the list was shown: open it again, read fresh.
+						if (apiErrorCode(cause) === "CHAT_ROLLBACK_FILES_CHANGED") setConfirming(turnId);
+					});
 				}}
 				onClose={() => setConfirming(undefined)}
 			/>
@@ -2161,7 +2165,7 @@ function RollbackConfirmation({
 	busy?: boolean;
 	error?: string;
 	onPreview?: (turnId: string) => Promise<RollbackPreview> | undefined;
-	onConfirm: (turnId: string, restoreFiles: boolean) => void;
+	onConfirm: (turnId: string, filePlanId?: string) => void;
 	onClose: () => void;
 }) {
 	const [preview, setPreview] = useState<{ turnId: string; result?: RollbackPreview; error?: string }>();
@@ -2229,7 +2233,7 @@ function RollbackConfirmation({
 			confirmDisabled={checking}
 			error={error ?? null}
 			onConfirm={() => {
-				if (turnId) onConfirm(turnId, Boolean(restore));
+				if (turnId) onConfirm(turnId, restore?.planId);
 			}}
 		>
 			{restore && restore.files.length > 0 ? (

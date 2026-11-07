@@ -3,6 +3,7 @@ package filesnapshot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -262,6 +263,150 @@ func TestPlanRefusesAWorktreeHoldingAnotherRepository(t *testing.T) {
 	if _, err := Plan(context.Background(), repo, ref); !errors.Is(err, ErrNestedRepository) {
 		t.Fatalf("Plan(embedded repository) = %v, want ErrNestedRepository", err)
 	}
+
+	// A committed submodule records only its commit, so an uncommitted edit
+	// inside it leaves the snapshot and the worktree looking identical.
+	repo = newRepo(t)
+	embedded = filepath.Join(repo, "vendor", "lib")
+	runGit(t, repo, "init", "-q", embedded)
+	write(t, embedded, "lib.go", "package lib\n")
+	runGit(t, embedded, "add", ".")
+	runGit(t, embedded, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "lib")
+	runGit(t, repo, "add", "vendor/lib")
+	runGit(t, repo, "commit", "-qm", "add lib")
+	if err := Capture(context.Background(), repo, ref); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	write(t, embedded, "lib.go", "package lib // edited by the turn\n")
+	if _, err := Plan(context.Background(), repo, ref); !errors.Is(err, ErrNestedRepository) {
+		t.Fatalf("Plan(dirty submodule) = %v, want ErrNestedRepository", err)
+	}
+}
+
+func TestSaveKeepsWhatARestoreOverwrites(t *testing.T) {
+	repo := newRepo(t)
+	ref := Ref("s1", "turn-1")
+	if err := Capture(context.Background(), repo, ref); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	write(t, repo, "a.txt", "edited after the turn\n")
+	write(t, repo, "new.txt", "created after the turn\n")
+
+	plan, err := Plan(context.Background(), repo, ref)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	saved := BeforeRollbackRef("s1", "turn-1")
+	if err := plan.Save(context.Background(), saved); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := plan.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := status(t, repo); got != "" {
+		t.Fatalf("status after restore = %q, want clean", got)
+	}
+
+	runGit(t, repo, "stash", "apply", saved)
+	for path, content := range map[string]string{"a.txt": "edited after the turn\n", "new.txt": "created after the turn\n"} {
+		if got := read(t, repo, path); got != content {
+			t.Fatalf("%s after stash apply = %q, want %q", path, got, content)
+		}
+	}
+}
+
+func TestPlanIDChangesWhenTheFilesDo(t *testing.T) {
+	repo := newRepo(t)
+	ref := Ref("s1", "turn-1")
+	if err := Capture(context.Background(), repo, ref); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	write(t, repo, "a.txt", "agent\n")
+	planID := func() string {
+		t.Helper()
+		plan, err := Plan(context.Background(), repo, ref)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		return plan.PlanID
+	}
+
+	first := planID()
+	if again := planID(); again != first {
+		t.Fatalf("PlanID changed with nothing edited: %q then %q", first, again)
+	}
+	write(t, repo, "c.txt", "edited after the preview\n")
+	edited := planID()
+	if edited == first {
+		t.Fatal("PlanID did not change after a file was created")
+	}
+	runGit(t, repo, "add", "c.txt")
+	if staged := planID(); staged == edited {
+		t.Fatal("PlanID did not change after a file was staged")
+	}
+}
+
+func TestCaptureSkipsTooManyOrTooLargeUntrackedFiles(t *testing.T) {
+	for name, create := range map[string]func(t *testing.T, repo string){
+		"one large file": func(t *testing.T, repo string) {
+			sparse(t, repo, "model.bin", maxUntrackedFileBytes+1)
+		},
+		"too much in total": func(t *testing.T, repo string) {
+			for i := range 5 {
+				sparse(t, repo, fmt.Sprintf("data/%d.bin", i), maxUntrackedBytes/4)
+			}
+		},
+		"too many files": func(t *testing.T, repo string) {
+			for i := range maxUntrackedFiles + 1 {
+				write(t, repo, fmt.Sprintf("gen/%d.txt", i), "x")
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newRepo(t)
+			create(t, repo)
+			ref := Ref("s1", "turn-1")
+			if err := Capture(context.Background(), repo, ref); !errors.Is(err, ErrTooLarge) {
+				t.Fatalf("Capture = %v, want ErrTooLarge", err)
+			}
+			if _, err := Plan(context.Background(), repo, ref); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("Plan after a skipped capture = %v, want ErrNotFound", err)
+			}
+		})
+	}
+
+	// Ignored files never count: they are not snapshotted at all.
+	repo := newRepo(t)
+	sparse(t, repo, "build/huge.bin", maxUntrackedBytes+1)
+	if err := Capture(context.Background(), repo, Ref("s1", "turn-1")); err != nil {
+		t.Fatalf("Capture with only ignored output = %v", err)
+	}
+}
+
+func TestDeleteOrphansDropsSessionsWhoseWorktreeIsGone(t *testing.T) {
+	repo := newRepo(t)
+	kept := filepath.Join(t.TempDir(), "kept")
+	gone := filepath.Join(t.TempDir(), "gone")
+	runGit(t, repo, "worktree", "add", "-b", "kept", kept)
+	runGit(t, repo, "worktree", "add", "-b", "gone", gone)
+	ctx := context.Background()
+	if err := Capture(ctx, kept, Ref("s1", "turn-1")); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if err := Capture(ctx, gone, Ref("s2", "turn-1"), Ref("s2", "turn-2")); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	// A ref that does not say where it was taken is never guessed at.
+	runGit(t, repo, "update-ref", Ref("s3", "turn-1"), "HEAD")
+	runGit(t, repo, "worktree", "remove", gone)
+
+	if err := DeleteOrphans(ctx, repo, []string{repo, kept}); err != nil {
+		t.Fatalf("DeleteOrphans: %v", err)
+	}
+	want := Ref("s1", "turn-1") + "\n" + Ref("s3", "turn-1")
+	if got := gitOutput(t, repo, "for-each-ref", "--format=%(refname)", "refs/ao/snapshots/"); got != want {
+		t.Fatalf("snapshot refs left = %q, want %q", got, want)
+	}
 }
 
 func TestCaptureRefusesAWorkspaceInsideAnotherRepository(t *testing.T) {
@@ -320,6 +465,15 @@ func write(t *testing.T, repo, path, content string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sparse creates a file of size bytes without writing them.
+func sparse(t *testing.T, repo, path string, size int64) {
+	t.Helper()
+	write(t, repo, path, "")
+	if err := os.Truncate(filepath.Join(repo, filepath.FromSlash(path)), size); err != nil {
 		t.Fatal(err)
 	}
 }

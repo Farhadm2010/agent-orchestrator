@@ -55,7 +55,7 @@ type ConversationService interface {
 	Skills(ctx context.Context, session domain.SessionID) ([]ports.ChatSkill, error)
 	SetTurnSettings(ctx context.Context, session domain.SessionID, settings domain.ConversationSettings) (domain.ConversationSettings, error)
 	Compact(ctx context.Context, session domain.SessionID) (ports.ChatCompactionResult, error)
-	Rollback(ctx context.Context, session domain.SessionID, turnID string, restoreFiles bool) (int, error)
+	Rollback(ctx context.Context, session domain.SessionID, turnID, filePlanID string) (int, error)
 	RollbackPreview(ctx context.Context, session domain.SessionID, turnID string) (chatsvc.RollbackPreview, error)
 	RetryTurn(ctx context.Context, session domain.SessionID, turnID string) (domain.ConversationTurn, error)
 	SetTitle(ctx context.Context, session domain.SessionID, title string) (string, error)
@@ -655,6 +655,7 @@ func (c *ConversationsController) rollbackPreview(w http.ResponseWriter, r *http
 		Files:           files,
 		TotalFiles:      len(preview.Changes),
 		CommitsSince:    preview.CommitsSince,
+		PlanID:          preview.PlanID,
 	})
 }
 
@@ -672,8 +673,17 @@ func (c *ConversationsController) rollback(w http.ResponseWriter, r *http.Reques
 			"INVALID_BODY", "request body is not valid JSON", nil)
 		return
 	}
+	var filePlanID string
+	if req.RestoreFiles {
+		if req.PlanID == "" {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation",
+				"CHAT_ROLLBACK_PLAN_REQUIRED", "restoreFiles needs the planId of the preview the user confirmed", nil)
+			return
+		}
+		filePlanID = req.PlanID
+	}
 	discarded, err := c.Svc.Rollback(r.Context(),
-		domain.SessionID(chi.URLParam(r, "sessionId")), chi.URLParam(r, "turnId"), req.RestoreFiles)
+		domain.SessionID(chi.URLParam(r, "sessionId")), chi.URLParam(r, "turnId"), filePlanID)
 	if err != nil {
 		writeConversationError(w, r, err)
 		return
@@ -1317,6 +1327,11 @@ func writeConversationError(w http.ResponseWriter, r *http.Request, err error) {
 		// and a rollback without restoreFiles still works.
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict",
 			"CHAT_ROLLBACK_FILES_UNAVAILABLE", err.Error(), nil)
+
+	case errors.Is(err, chatsvc.ErrFilesChanged):
+		// Nothing changed. A fresh preview lists what a restore would do now.
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict",
+			"CHAT_ROLLBACK_FILES_CHANGED", err.Error(), nil)
 
 	case errors.Is(err, chatsvc.ErrForkUnsupported):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict",

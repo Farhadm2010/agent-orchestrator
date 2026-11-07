@@ -46,7 +46,7 @@ describe("ChatWorkspace rollback", () => {
 		// The first settled turn in the fixture is turn-1; the daemon must be given
 		// AO's own turn id, which is what the snapshot exposes. Without a preview the
 		// dialog promised only the conversation, so files are not restored.
-		expect(onRollback).toHaveBeenCalledWith("turn-1", false);
+		expect(onRollback).toHaveBeenCalledWith("turn-1", undefined);
 	});
 
 	it("lists the files it will restore before offering the button, then restores them", async () => {
@@ -70,6 +70,7 @@ describe("ChatWorkspace rollback", () => {
 			],
 			totalFiles: 4,
 			commitsSince: 1,
+			planId: "plan-1",
 		});
 		const list = await within(dialog).findByRole("list", { name: "Files that will change" });
 		expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
@@ -84,7 +85,35 @@ describe("ChatWorkspace rollback", () => {
 		expect(dialog.textContent).not.toContain("left exactly as they are");
 
 		await userEvent.click(within(dialog).getByRole("button", { name: "Roll back" }));
-		expect(onRollback).toHaveBeenCalledWith("turn-1", true);
+		// The daemon restores files only against the list the user saw.
+		expect(onRollback).toHaveBeenCalledWith("turn-1", "plan-1");
+	});
+
+	it("shows the list again, read fresh, when files changed after it was shown", async () => {
+		const onRollback = vi.fn().mockRejectedValueOnce({ code: "CHAT_ROLLBACK_FILES_CHANGED", message: "changed" });
+		const previews: RollbackPreview[] = [
+			{ filesRestorable: true, files: [{ path: "a.ts", change: "reverted" }], totalFiles: 1, commitsSince: 0, planId: "plan-1" },
+			{
+				filesRestorable: true,
+				files: [{ path: "a.ts", change: "reverted" }, { path: "notes.md", change: "removed" }],
+				totalFiles: 2,
+				commitsSince: 0,
+				planId: "plan-2",
+			},
+		];
+		const onPreviewRollback = vi.fn(async () => previews.shift()!);
+		render(<ChatWorkspace snapshot={idleSnapshot()} onRollback={onRollback} onPreviewRollback={onPreviewRollback} />);
+
+		await userEvent.click(screen.getAllByRole("button", { name: "Roll back to here" })[0]!);
+		await within(screen.getByRole("dialog")).findByText("a.ts");
+		await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Roll back" }));
+		expect(onRollback).toHaveBeenCalledWith("turn-1", "plan-1");
+
+		const dialog = await screen.findByRole("dialog");
+		await within(dialog).findByText("notes.md");
+		expect(onPreviewRollback).toHaveBeenCalledTimes(2);
+		await userEvent.click(within(dialog).getByRole("button", { name: "Roll back" }));
+		expect(onRollback).toHaveBeenLastCalledWith("turn-1", "plan-2");
 	});
 
 	it("says why files stay as they are when they cannot be restored", async () => {
@@ -105,7 +134,7 @@ describe("ChatWorkspace rollback", () => {
 		expect(within(dialog).queryByRole("list")).toBeNull();
 
 		await userEvent.click(within(dialog).getByRole("button", { name: "Roll back" }));
-		expect(onRollback).toHaveBeenCalledWith("turn-1", false);
+		expect(onRollback).toHaveBeenCalledWith("turn-1", undefined);
 	});
 
 	// An older daemon has no preview route; the dialog must then promise only what
@@ -120,7 +149,7 @@ describe("ChatWorkspace rollback", () => {
 		await within(dialog).findByText(/left exactly as they are/);
 
 		await userEvent.click(within(dialog).getByRole("button", { name: "Roll back" }));
-		expect(onRollback).toHaveBeenCalledWith("turn-1", false);
+		expect(onRollback).toHaveBeenCalledWith("turn-1", undefined);
 	});
 
 	it("says the agent forgets, and that the worktree does not change", async () => {

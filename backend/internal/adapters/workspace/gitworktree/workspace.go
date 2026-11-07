@@ -367,6 +367,7 @@ func (w *Workspace) Create(ctx context.Context, cfg ports.WorkspaceConfig) (port
 	if cfg.FreshBranch {
 		baseSHA = seedSHA
 	}
+	w.deleteOrphanedFileSnapshots(ctx, repo)
 	return ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, BaseSHA: baseSHA, BaseRef: baseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID}, nil
 }
 
@@ -853,8 +854,10 @@ func (w *Workspace) DestroyReclaim(ctx context.Context, info ports.WorkspaceInfo
 }
 
 // deleteFileSnapshots drops the Chat rollback snapshots of a session whose
-// worktree is gone, since nothing can restore them any more. A failure only
-// leaves unreachable refs behind, so it is logged rather than failing teardown.
+// worktree is gone, since nothing can restore them any more, and then those of
+// any other session in the repository whose worktree went without a Destroy. A
+// failure only leaves unreachable refs behind, so it is logged rather than
+// failing teardown.
 func (w *Workspace) deleteFileSnapshots(ctx context.Context, info ports.WorkspaceInfo) {
 	if info.SessionID == "" {
 		return
@@ -865,6 +868,25 @@ func (w *Workspace) deleteFileSnapshots(ctx context.Context, info ports.Workspac
 	}
 	if err != nil {
 		w.logf("gitworktree: delete file snapshots for session %s: %v", info.SessionID, err)
+		return
+	}
+	w.deleteOrphanedFileSnapshots(ctx, repo)
+}
+
+// deleteOrphanedFileSnapshots drops the Chat rollback snapshots of every session
+// whose worktree is no longer registered in repo, however that session ended. A
+// failure only leaves unreachable refs behind, so it is logged.
+func (w *Workspace) deleteOrphanedFileSnapshots(ctx context.Context, repo string) {
+	records, err := w.listRecords(ctx, repo)
+	if err == nil {
+		paths := make([]string, len(records))
+		for i, record := range records {
+			paths[i] = record.Path
+		}
+		err = filesnapshot.DeleteOrphans(ctx, repo, paths)
+	}
+	if err != nil {
+		w.logf("gitworktree: delete orphaned file snapshots in %s: %v", repo, err)
 	}
 }
 

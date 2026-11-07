@@ -26,6 +26,10 @@ type RollbackPreview struct {
 	// CommitsSince counts commits made on the branch after the turn. A restore
 	// leaves them in place, so their changes come back as uncommitted edits.
 	CommitsSince int
+	// PlanID is what a rollback that restores these files must be given. It stops
+	// matching as soon as the worktree changes, so nothing the preview did not
+	// list is ever overwritten.
+	PlanID string
 }
 
 // RollbackPreview reports what restoring the files from before turnID would
@@ -54,7 +58,34 @@ func (s *Service) RollbackPreview(ctx context.Context, id domain.SessionID, turn
 	if err != nil {
 		return RollbackPreview{}, err
 	}
-	return RollbackPreview{Unavailable: unavailable, Changes: restore.Changes, CommitsSince: restore.CommitsSince}, nil
+	return RollbackPreview{Unavailable: unavailable, Changes: restore.Changes, CommitsSince: restore.CommitsSince, PlanID: restore.PlanID}, nil
+}
+
+// restoreFiles puts the worktree back to the snapshot taken before turnID, once
+// the files are known to still match the preview whose PlanID the user
+// confirmed. What it overwrites is saved under a ref first, so it outlives the
+// rollback, and a failed write is undone before this returns.
+func (c *Controller) restoreFiles(ctx context.Context, turnID, planID string) (filesnapshot.Restore, error) {
+	restore, unavailable, err := planFileRestore(ctx, c.workspacePath, c.sessionID, turnID)
+	if err != nil {
+		return filesnapshot.Restore{}, err
+	}
+	if unavailable != "" {
+		return filesnapshot.Restore{}, fmt.Errorf("%w: %s", ErrFilesNotRestorable, unavailable)
+	}
+	if restore.PlanID != planID {
+		return filesnapshot.Restore{}, ErrFilesChanged
+	}
+	if len(restore.Changes) == 0 {
+		return restore, nil
+	}
+	if err := restore.Save(ctx, filesnapshot.BeforeRollbackRef(c.sessionID, turnID)); err != nil {
+		return filesnapshot.Restore{}, fmt.Errorf("save files before restoring %s: %w", turnID, err)
+	}
+	if err := restore.Apply(ctx); err != nil {
+		return filesnapshot.Restore{}, c.undoFileRestore(ctx, restore, fmt.Errorf("restore files for %s: %w", turnID, err))
+	}
+	return restore, nil
 }
 
 // planFileRestore works out how to put the worktree back to before turnID. A
@@ -93,8 +124,11 @@ func (c *Controller) snapshotFiles(ctx context.Context, turnIDs []string) {
 	defer cancel()
 	if err := filesnapshot.Capture(ctx, c.workspacePath, refs...); err != nil {
 		level := slog.LevelWarn
-		if errors.Is(err, filesnapshot.ErrNotRepository) {
+		switch {
+		case errors.Is(err, filesnapshot.ErrNotRepository):
 			level = slog.LevelDebug
+		case errors.Is(err, filesnapshot.ErrTooLarge):
+			level = slog.LevelInfo
 		}
 		c.log.Log(ctx, level, "chat file snapshot failed; rolling this turn back will not restore files",
 			"session", c.sessionID, "turn", turnIDs[0], "error", err)

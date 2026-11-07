@@ -1013,13 +1013,13 @@ describe("conversation branching commands", () => {
 
 	it("asks the daemon to restore files only when the confirmation listed them", async () => {
 		postMock.mockResolvedValue({ data: { turnsDiscarded: 1 }, error: undefined });
-		getMock.mockResolvedValueOnce({ data: { filesRestorable: true, files: [], totalFiles: 0, commitsSince: 0 }, error: undefined });
+		getMock.mockResolvedValueOnce({ data: { filesRestorable: true, files: [], totalFiles: 0, commitsSince: 0, planId: "plan-1" }, error: undefined });
 		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
 
 		await act(async () => {
-			await expect(result.current.previewRollback("turn-2")).resolves.toMatchObject({ filesRestorable: true });
-			await result.current.rollback("turn-2", true);
-			await result.current.rollback("turn-3", false);
+			await expect(result.current.previewRollback("turn-2")).resolves.toMatchObject({ filesRestorable: true, planId: "plan-1" });
+			await result.current.rollback("turn-2", "plan-1");
+			await result.current.rollback("turn-3");
 		});
 
 		expect(getMock).toHaveBeenCalledWith(
@@ -1028,7 +1028,7 @@ describe("conversation branching commands", () => {
 		);
 		expect(postMock).toHaveBeenCalledWith(
 			"/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/rollback",
-			{ params: { path: { sessionId: "ao-1", turnId: "turn-2" } }, body: { restoreFiles: true } },
+			{ params: { path: { sessionId: "ao-1", turnId: "turn-2" } }, body: { restoreFiles: true, planId: "plan-1" } },
 		);
 		expect(postMock).toHaveBeenCalledWith(
 			"/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/rollback",

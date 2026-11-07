@@ -6893,6 +6893,7 @@ export interface components {
             agentConfig?: components["schemas"]["AgentConfig"];
         };
         RollbackConversationRequest: {
+            planId?: string;
             restoreFiles?: boolean;
         };
         RollbackConversationResponse: {
@@ -6907,6 +6908,7 @@ export interface components {
             commitsSince: number;
             files: components["schemas"]["RollbackFileChange"][];
             filesRestorable: boolean;
+            planId?: string;
             reason?: string;
             totalFiles: number;
         };

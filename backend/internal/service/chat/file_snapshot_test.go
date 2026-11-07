@@ -48,7 +48,7 @@ func TestRollbackWithFilesRestoresTheWorktreeFromBeforeTheTurn(t *testing.T) {
 		t.Fatalf("preview = %+v, want restorable %+v", preview, want)
 	}
 
-	discarded, err := h.svc.Rollback(ctx, testSession, second, true)
+	discarded, err := h.svc.Rollback(ctx, testSession, second, preview.PlanID)
 	if err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -60,6 +60,42 @@ func TestRollbackWithFilesRestoresTheWorktreeFromBeforeTheTurn(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "added.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("added.txt survived the rollback: %v", err)
+	}
+	// What the restore overwrote is kept under a ref, not left to gc.
+	saved := filesnapshot.BeforeRollbackRef(testSession, second)
+	if got := gitOutputIn(t, workspace, "show", saved+":added.txt"); got != "second turn" {
+		t.Fatalf("added.txt under %s = %q, want the overwritten contents", saved, got)
+	}
+}
+
+// Files edited after the preview was shown were never listed, so the rollback is
+// refused before anything changes and the user is shown the list again.
+func TestRollbackWithFilesRefusesWhenTheFilesChangedSinceThePreview(t *testing.T) {
+	recorder := newHistoryRecorder()
+	workspace := gitWorkspace(t)
+	h := newGitHarness(t, recorder, workspace)
+	ctx := context.Background()
+
+	turnID := completeTurn(t, h, "only", "provider-turn-1")
+	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool { return len(s.Messages) == 2 })
+	writeWorkspaceFile(t, workspace, "a.txt", "agent edit\n")
+	preview, err := h.svc.RollbackPreview(ctx, testSession, turnID)
+	if err != nil || len(preview.Changes) != 1 || preview.PlanID == "" {
+		t.Fatalf("RollbackPreview = %+v, %v; want a.txt listed with a plan id", preview, err)
+	}
+	writeWorkspaceFile(t, workspace, "notes.txt", "written while the dialog was open\n")
+
+	if _, err := h.svc.Rollback(ctx, testSession, turnID, preview.PlanID); !errors.Is(err, chatsvc.ErrFilesChanged) {
+		t.Fatalf("Rollback = %v, want ErrFilesChanged", err)
+	}
+	if targets := recorder.rollbackTargets(); len(targets) != 0 {
+		t.Fatalf("provider was asked to roll back %v after the files changed", targets)
+	}
+	if got := readWorkspaceFile(t, workspace, "notes.txt"); got != "written while the dialog was open\n" {
+		t.Fatalf("notes.txt = %q, want it untouched", got)
+	}
+	if got := readWorkspaceFile(t, workspace, "a.txt"); got != "agent edit\n" {
+		t.Fatalf("a.txt = %q, want it untouched", got)
 	}
 }
 
@@ -76,11 +112,12 @@ func TestRollbackWithFilesPutsFilesBackWhenTheProviderRefuses(t *testing.T) {
 	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool { return len(s.Messages) == 2 })
 	writeWorkspaceFile(t, workspace, "a.txt", "agent edit\n")
 	writeWorkspaceFile(t, workspace, "added.txt", "agent file\n")
-	if preview, err := h.svc.RollbackPreview(ctx, testSession, turnID); err != nil || len(preview.Changes) != 2 {
+	preview, err := h.svc.RollbackPreview(ctx, testSession, turnID)
+	if err != nil || len(preview.Changes) != 2 {
 		t.Fatalf("RollbackPreview = %+v, %v; want both agent files listed", preview, err)
 	}
 
-	_, err := h.svc.Rollback(ctx, testSession, turnID, true)
+	_, err = h.svc.Rollback(ctx, testSession, turnID, preview.PlanID)
 	if !errors.Is(err, chatsvc.ErrProviderRefused) {
 		t.Fatalf("Rollback = %v, want ErrProviderRefused", err)
 	}
@@ -109,13 +146,13 @@ func TestRollbackWithFilesRefusesWhenFilesCannotBeRestored(t *testing.T) {
 	if err != nil || preview.Unavailable == "" || len(preview.Changes) != 0 {
 		t.Fatalf("RollbackPreview = %+v, %v; want unavailable with a reason", preview, err)
 	}
-	if _, err := h.svc.Rollback(ctx, testSession, turnID, true); !errors.Is(err, chatsvc.ErrFilesNotRestorable) {
+	if _, err := h.svc.Rollback(ctx, testSession, turnID, "plan-from-another-preview"); !errors.Is(err, chatsvc.ErrFilesNotRestorable) {
 		t.Fatalf("Rollback = %v, want ErrFilesNotRestorable", err)
 	}
 	if targets := recorder.rollbackTargets(); len(targets) != 0 {
 		t.Fatalf("provider was asked to roll back %v after files were refused", targets)
 	}
-	if _, err := h.svc.Rollback(ctx, testSession, turnID, false); err != nil {
+	if _, err := h.svc.Rollback(ctx, testSession, turnID, ""); err != nil {
 		t.Fatalf("conversation-only Rollback: %v", err)
 	}
 }
@@ -129,7 +166,7 @@ func TestRollbackWithoutFilesLeavesTheWorktreeAlone(t *testing.T) {
 	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool { return len(s.Messages) == 2 })
 	writeWorkspaceFile(t, workspace, "a.txt", "agent edit\n")
 
-	if _, err := h.svc.Rollback(context.Background(), testSession, turnID, false); err != nil {
+	if _, err := h.svc.Rollback(context.Background(), testSession, turnID, ""); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if got := readWorkspaceFile(t, workspace, "a.txt"); got != "agent edit\n" {
@@ -151,7 +188,7 @@ func TestTurnsAreNotSnapshottedForAnAgentThatCannotRollBack(t *testing.T) {
 	if _, err := h.svc.RollbackPreview(context.Background(), testSession, "not-a-turn"); !errors.Is(err, domain.ErrNoConversationTurn) {
 		t.Fatalf("RollbackPreview(unknown turn) = %v, want ErrNoConversationTurn", err)
 	}
-	if _, err := h.svc.Rollback(context.Background(), testSession, turnID, true); !errors.Is(err, chatsvc.ErrRollbackUnsupported) {
+	if _, err := h.svc.Rollback(context.Background(), testSession, turnID, "plan"); !errors.Is(err, chatsvc.ErrRollbackUnsupported) {
 		t.Fatalf("Rollback = %v, want ErrRollbackUnsupported", err)
 	}
 }
