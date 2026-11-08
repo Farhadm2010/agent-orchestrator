@@ -372,9 +372,7 @@ func (s *Service) indexOpenCodeSession(ctx context.Context, target domain.Sessio
 	now := s.now()
 	docs := make([]domain.SessionSearchDoc, 0, len(lines)+1)
 	for _, line := range lines {
-		if doc, ok := nativeDoc(sourceKey, target, s.machine, line, now); ok {
-			docs = append(docs, doc)
-		}
+		docs = append(docs, nativeDocs(sourceKey, target, s.machine, line, now)...)
 	}
 	if title := strings.TrimSpace(target.DisplayName); title != "" {
 		docs = append(docs, domain.SessionSearchDoc{

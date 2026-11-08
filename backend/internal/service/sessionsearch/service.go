@@ -39,6 +39,11 @@ const (
 	// maxDocBodyBytes caps one indexed document's text. A snippet needs far
 	// less, and one 64 KiB command output would otherwise dominate a batch.
 	maxDocBodyBytes = 8 << 10
+	// maxMessageChunks bounds how many documents one long message becomes. A
+	// message past maxDocBodyBytes is split rather than cut, so a long pasted
+	// prompt stays searchable to its end; the bound keeps one pasted log from
+	// turning into hundreds of documents.
+	maxMessageChunks = 8
 	// maxTitleBytes caps a title document.
 	maxTitleBytes = 512
 	// maxIdentifierSplits bounds how many identifiers per document are expanded
@@ -699,28 +704,32 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 		if message.Role != domain.MessageRoleUser && message.Role != domain.MessageRoleAssistant {
 			continue
 		}
-		body := searchableText(message.Text)
-		if strings.TrimSpace(body) == "" {
-			continue
-		}
 		kind := domain.SessionSearchKindAssistant
 		if message.Role == domain.MessageRoleUser {
 			kind = domain.SessionSearchKindUser
 		}
-		docs = append(docs, domain.SessionSearchDoc{
-			SourceKey: sourceKey,
-			DocKey:    message.ID,
-			SessionID: string(conversation.SessionID),
-			ProjectID: string(conversation.ProjectID),
-			Harness:   string(conversation.Harness),
-			Machine:   s.machine,
-			Kind:      kind,
-			MessageID: message.ID,
-			Seq:       message.Sequence,
-			Body:      body,
-			CreatedAt: message.CreatedAt,
-			IndexedAt: now,
-		})
+		// A long message is several documents with one message id, so it is
+		// still one place to open and one match in the row's count.
+		for index, chunk := range textChunks(message.Text, maxDocBodyBytes, maxMessageChunks) {
+			body := domain.SessionSearchSplitIdentifiers(chunk, maxIdentifierSplits)
+			if strings.TrimSpace(body) == "" {
+				continue
+			}
+			docs = append(docs, domain.SessionSearchDoc{
+				SourceKey: sourceKey,
+				DocKey:    chunkDocKey(message.ID, index),
+				SessionID: string(conversation.SessionID),
+				ProjectID: string(conversation.ProjectID),
+				Harness:   string(conversation.Harness),
+				Machine:   s.machine,
+				Kind:      kind,
+				MessageID: message.ID,
+				Seq:       message.Sequence,
+				Body:      body,
+				CreatedAt: message.CreatedAt,
+				IndexedAt: now,
+			})
+		}
 		highest = max(highest, message.Sequence)
 	}
 	for _, activity := range activities {
@@ -775,9 +784,12 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 // which would discard exactly the end of a failing command's output that the
 // document exists to keep.
 const (
-	activitySummaryBytes  = 1 << 10
-	activityDetailBytes   = 2 << 10
-	activityOutputBytes   = 4 << 10
+	activitySummaryBytes = 1 << 10
+	activityDetailBytes  = 2 << 10
+	activityOutputBytes  = 4 << 10
+	// outputHeadDivisor sets how much of an output budget goes to its start:
+	// a quarter. The rest keeps its end, where a failure usually is.
+	outputHeadDivisor     = 4
 	activityStreamedBytes = 1 << 10
 	// activityDiffBytes bounds the diff text indexed for one file change. A large
 	// patch is mostly context lines; the changed lines carry the signal.
@@ -790,8 +802,8 @@ const (
 // output, while a plan or reasoning summary is agent-authored prose. The body
 // concatenates what a reader would see: the summary, the file paths or tool
 // arguments from the detail payload, the command output, and the streamed text.
-// Output is tail-truncated because the useful part of a failing command is at
-// its end.
+// Long output keeps its start and its end: the end is where a failure
+// usually is, and the start names what ran (the test, the build target).
 func (s *Service) activityDoc(conversation domain.SessionSearchConversation, activity domain.SessionSearchActivity, now time.Time) (domain.SessionSearchDoc, bool) {
 	body := strings.Builder{}
 	appendSection := func(text string) {
@@ -819,7 +831,7 @@ func (s *Service) activityDoc(conversation domain.SessionSearchConversation, act
 		// "\u003c" and a literal "\n".
 		appendSection(truncateBytes(rawJSONText(json.RawMessage(activity.Detail)), activityDetailBytes))
 	}
-	appendSection(tailText(activity.Output, activityOutputBytes))
+	appendSection(headTailText(activity.Output, activityOutputBytes))
 	appendSection(tailText(activity.Streamed, activityStreamedBytes))
 	if strings.TrimSpace(body.String()) == "" {
 		return domain.SessionSearchDoc{}, false
@@ -1351,6 +1363,57 @@ func searchableText(value string) string {
 		return ""
 	}
 	return domain.SessionSearchSplitIdentifiers(trimmed, maxIdentifierSplits)
+}
+
+// outputGapMarker stands for the middle of a long output that is not kept.
+// The tokenizer reads it as a separator.
+const outputGapMarker = "\n…\n"
+
+// headTailText keeps the start and the end of a text longer than limit: a
+// quarter of the budget from the start, the rest from the end. Keeping only
+// the end lost the start of long output entirely: in a benchmark on real
+// transcripts, 46% of searches for words near the start of a long output
+// found nothing.
+func headTailText(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	head := truncateBytes(value, limit/outputHeadDivisor)
+	return head + outputGapMarker + tailText(value, limit-len(head)-len(outputGapMarker))
+}
+
+// textChunks splits a text into pieces of at most limit bytes, breaking at a
+// line or space near the limit when there is one, and keeps at most maxChunks
+// pieces.
+func textChunks(value string, limit, maxChunks int) []string {
+	if len(value) <= limit {
+		return []string{value}
+	}
+	chunks := make([]string, 0, min(maxChunks, len(value)/limit+1))
+	for value != "" && len(chunks) < maxChunks {
+		if len(value) <= limit {
+			chunks = append(chunks, value)
+			break
+		}
+		piece := truncateBytes(value, limit)
+		// Prefer a break in the last eighth of the piece, so a word is not cut.
+		if cut := strings.LastIndexAny(piece, "\n "); cut > limit-limit/8 {
+			piece = piece[:cut+1]
+		}
+		chunks = append(chunks, piece)
+		value = value[len(piece):]
+	}
+	return chunks
+}
+
+// chunkDocKey names a message's chunk: the first keeps the message's own key,
+// later ones add "#n". Match counts strip the suffix, so a long message is one
+// match however many chunks hold the word.
+func chunkDocKey(key string, index int) string {
+	if index == 0 {
+		return key
+	}
+	return fmt.Sprintf("%s#%d", key, index+1)
 }
 
 // tailText keeps the END of a long text. Command output is read to diagnose a

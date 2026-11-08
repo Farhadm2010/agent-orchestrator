@@ -366,13 +366,19 @@ func TestReadNativeTranscriptBoundsEachUnit(t *testing.T) {
 	if err != nil || len(lines) != 2 {
 		t.Fatalf("lines = %d, err = %v", len(lines), err)
 	}
-	for _, line := range lines {
-		if len(line.text) > maxDocBodyBytes {
-			t.Fatalf("%s unit holds %d bytes, want at most %d", line.kind, len(line.text), maxDocBodyBytes)
-		}
+	// Command output keeps one document's worth (its start and end); prose
+	// keeps as many chunks as a message may become.
+	if got := len(lines[0].text); got > maxDocBodyBytes {
+		t.Fatalf("command unit holds %d bytes, want at most %d", got, maxDocBodyBytes)
+	}
+	if got := len(lines[1].text); got > maxDocBodyBytes*maxMessageChunks {
+		t.Fatalf("user unit holds %d bytes, want at most %d", got, maxDocBodyBytes*maxMessageChunks)
 	}
 	if !strings.HasSuffix(lines[0].text, "zzFinalError") {
 		t.Fatal("command output must keep its end, where the failure is")
+	}
+	if head, _, found := strings.Cut(lines[0].text, outputGapMarker); !found || !strings.Contains(head, "noise noise") {
+		t.Fatal("command output must keep its start too, before the gap")
 	}
 	if !strings.HasPrefix(lines[1].text, "zzOpening") {
 		t.Fatal("prose must keep its start")

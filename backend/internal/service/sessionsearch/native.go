@@ -46,38 +46,50 @@ type nativeLine struct {
 //	2: Claude queued prompts and edited files; Codex reads one stream per file
 //	   (no duplicate messages) and adds file changes, MCP and web tools;
 //	   OpenCode v2 adds tool calls, their output and reasoning.
-const nativeFormat = "native-v2"
+//	3: long command output keeps its start as well as its end; a long message
+//	   is split into chunks instead of cut at 8 KiB.
+const nativeFormat = "native-v3"
 
-// nativeDoc turns one parsed unit into a document.
-func nativeDoc(sourceKey string, target domain.SessionSearchTarget, machine string, line nativeLine, now time.Time) (domain.SessionSearchDoc, bool) {
-	text := line.text
+// nativeDocs turns one parsed unit into its documents. Command output keeps
+// its start and end in one document; a long message is split into chunks.
+func nativeDocs(sourceKey string, target domain.SessionSearchTarget, machine string, line nativeLine, now time.Time) []domain.SessionSearchDoc {
+	var chunks []string
 	if line.kind == domain.SessionSearchKindCommand {
-		// A failing command is read from its end.
-		text = tailText(text, maxDocBodyBytes)
+		chunks = []string{headTailText(line.text, maxDocBodyBytes)}
+	} else {
+		chunks = textChunks(line.text, maxDocBodyBytes, maxMessageChunks)
 	}
-	body := searchableText(text)
 	paths := searchableText(strings.Join(line.paths, "\n"))
-	if strings.TrimSpace(body) == "" && paths == "" {
-		return domain.SessionSearchDoc{}, false
-	}
 	created := line.at
 	if created.IsZero() {
 		created = target.CreatedAt
 	}
-	return domain.SessionSearchDoc{
-		SourceKey: sourceKey,
-		DocKey:    fmt.Sprintf("line:%d:%d", line.offset, line.ordinal),
-		SessionID: string(target.ID),
-		ProjectID: string(target.ProjectID),
-		Harness:   string(target.Harness),
-		Machine:   machine,
-		Kind:      line.kind,
-		Seq:       line.offset,
-		Body:      body,
-		Paths:     paths,
-		CreatedAt: created,
-		IndexedAt: now,
-	}, true
+	docs := make([]domain.SessionSearchDoc, 0, len(chunks))
+	for index, chunk := range chunks {
+		body := domain.SessionSearchSplitIdentifiers(chunk, maxIdentifierSplits)
+		chunkPaths := ""
+		if index == 0 {
+			chunkPaths = paths
+		}
+		if strings.TrimSpace(body) == "" && chunkPaths == "" {
+			continue
+		}
+		docs = append(docs, domain.SessionSearchDoc{
+			SourceKey: sourceKey,
+			DocKey:    chunkDocKey(fmt.Sprintf("line:%d:%d", line.offset, line.ordinal), index),
+			SessionID: string(target.ID),
+			ProjectID: string(target.ProjectID),
+			Harness:   string(target.Harness),
+			Machine:   machine,
+			Kind:      line.kind,
+			Seq:       line.offset,
+			Body:      body,
+			Paths:     chunkPaths,
+			CreatedAt: created,
+			IndexedAt: now,
+		})
+	}
+	return docs
 }
 
 // indexNativeSession indexes one session's provider transcript, if the harness
@@ -175,9 +187,7 @@ func (s *Service) indexNativeSession(ctx context.Context, target domain.SessionS
 	now := s.now()
 	docs := make([]domain.SessionSearchDoc, 0, len(lines)+1)
 	for _, line := range lines {
-		if doc, ok := nativeDoc(sourceKey, target, s.machine, line, now); ok {
-			docs = append(docs, doc)
-		}
+		docs = append(docs, nativeDocs(sourceKey, target, s.machine, line, now)...)
 	}
 	// The session's own name and prompt make it findable even when the provider
 	// transcript holds nothing (or the session is a TUI session whose transcript
@@ -1020,16 +1030,20 @@ func readNativeTranscript(ctx context.Context, path string, offset int64, parser
 	}
 }
 
-// boundNativeText trims a unit to what its document will keep (the end of
-// command output, the start of anything else) as the transcript is read, and
-// copies it so the line it came from can be freed. A transcript of tens of
-// megabytes of tool output then holds a few kilobytes per unit, not the file.
+// boundNativeText trims a unit to what its documents will keep (the start and
+// end of command output, the chunks of anything else) as the transcript is
+// read, and copies it so the line it came from can be freed. A transcript of
+// tens of megabytes of tool output then holds a few kilobytes per unit, not
+// the file.
 func boundNativeText(kind domain.SessionSearchKind, text string) string {
-	if len(text) <= maxDocBodyBytes {
+	if kind == domain.SessionSearchKindCommand {
+		if len(text) <= maxDocBodyBytes {
+			return text
+		}
+		return strings.Clone(headTailText(text, maxDocBodyBytes))
+	}
+	if len(text) <= maxDocBodyBytes*maxMessageChunks {
 		return text
 	}
-	if kind == domain.SessionSearchKindCommand {
-		return strings.Clone(tailText(text, maxDocBodyBytes))
-	}
-	return strings.Clone(truncateBytes(text, maxDocBodyBytes))
+	return strings.Clone(truncateBytes(text, maxDocBodyBytes*maxMessageChunks))
 }

@@ -654,7 +654,10 @@ func (s *Store) SessionSearchMatchCounts(ctx context.Context, matchQuery string,
 		return nil, fmt.Errorf("encode session ids: %w", err)
 	}
 	rows, err := s.readDB.QueryContext(ctx, `
-SELECT d.session_id, COUNT(DISTINCT COALESCE(NULLIF(d.message_id, ''), 'doc:' || d.id))
+SELECT d.session_id, COUNT(DISTINCT COALESCE(NULLIF(d.message_id, ''),
+       -- A long message's chunks ("key#2", "key#3") are one match.
+       d.source_key || '|' || d.kind || '|' ||
+       CASE WHEN instr(d.doc_key, '#') > 0 THEN substr(d.doc_key, 1, instr(d.doc_key, '#') - 1) ELSE d.doc_key END))
 FROM session_search_docs d
 WHERE d.session_id IN (SELECT value FROM json_each(?))
   AND d.kind <> 'title'
