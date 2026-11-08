@@ -3402,6 +3402,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/move/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List what a move to AO Cloud would push, or why it cannot move */
+        get: operations["previewSessionMove"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/pin": {
         parameters: {
             query?: never;
@@ -6686,6 +6703,11 @@ export interface components {
             running: boolean;
             supported: boolean;
         };
+        MoveChange: {
+            path: string;
+            /** @enum {string} */
+            status: "added" | "modified" | "deleted";
+        };
         MoveCompleteRequest: {
             moveId: string;
             orgId: string;
@@ -6734,6 +6756,10 @@ export interface components {
             terminateOnPrMerge: boolean;
             tip: string;
             wip: boolean;
+        };
+        MovePreviewResponse: {
+            branch: string;
+            changes: components["schemas"]["MoveChange"][];
         };
         NotificationEnvelope: {
             notification: components["schemas"]["NotificationResponse"];
@@ -20544,6 +20570,56 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    previewSessionMove: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MovePreviewResponse"];
                 };
             };
             /** @description Not Found */

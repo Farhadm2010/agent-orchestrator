@@ -372,6 +372,8 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersRenameSessionResponse":                    "RenameSessionResponse",
 	"ControllersRestoreSessionResponse":                   "RestoreSessionResponse",
 	"ControllersExitAgentResponse":                        "ExitAgentResponse",
+	"ControllersMovePreviewResponse":                      "MovePreviewResponse",
+	"ControllersMoveChange":                               "MoveChange",
 	"ControllersMoveExportRequest":                        "MoveExportRequest",
 	"ControllersMoveExportResponse":                       "MoveExportResponse",
 	"ControllersMoveImportRequest":                        "MoveImportRequest",
@@ -3686,6 +3688,17 @@ func sessionOperations() []operation {
 				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/move/preview", id: "previewSessionMove", tag: "sessions",
+			summary:    "List what a move to AO Cloud would push, or why it cannot move",
+			pathParams: []any{controllers.SessionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.MovePreviewResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
 			},
 		},
 		{
