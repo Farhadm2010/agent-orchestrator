@@ -1,7 +1,7 @@
 import { useCallback, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Archive, Code2, Copy, ExternalLink, GitBranch, Pencil, Pin, PinOff, Play } from "@/components/app-icons";
+import { Archive, ArrowRightLeft, Code2, Copy, ExternalLink, GitBranch, Pencil, Pin, PinOff, Play } from "@/components/app-icons";
 import type { OpenTarget } from "../../shared/editor-handoff";
 import { resumeAgentOnOpen, useCanResumeAgent } from "../hooks/useCanResumeAgent";
 import { conversationQueryKey } from "../hooks/useConversation";
@@ -11,7 +11,7 @@ import { workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { aoBridge } from "../lib/bridge";
 import { sessionBranchPresentation } from "../lib/session-branch";
 import { useUiStore } from "../stores/ui-store";
-import { isOrchestratorSession, primaryPR, type WorkspaceSession } from "../types/workspace";
+import { isOrchestratorSession, primaryPR, sessionIsActive, type WorkspaceSession } from "../types/workspace";
 import { MenuEntries, type MenuEntry } from "./menu-model";
 import { OpenTargetIcon } from "./OpenTargetIcon";
 
@@ -58,6 +58,7 @@ export function useSessionMenuEntries(session: WorkspaceSession | undefined, { o
 	// Remote and Cloud sessions have no local workspace for Electron to hand off.
 	const hasLocalWorkspace = Boolean(session && !session.hostId && !session.cloud);
 	const workspaceEntries = useSessionWorkspaceEntries(hasLocalWorkspace ? session : undefined);
+	const openMoveSession = useUiStore((state) => state.openMoveSession);
 	if (!session) return [];
 
 	const branch = sessionBranchPresentation(session).branch;
@@ -67,6 +68,8 @@ export function useSessionMenuEntries(session: WorkspaceSession | undefined, { o
 	// plane for a Cloud session. A session shared from another organization is
 	// the sharer's to name and lists outside this sidebar's pins.
 	const canRenameAndPin = !session.cloud?.shared;
+	// A live worker on an AO machine can move to AO Cloud.
+	const canMove = !session.cloud && !isOrchestratorSession(session) && sessionIsActive(session);
 	const resume = () => {
 		void resumeAgentOnOpen(session.id)
 			.catch((error: unknown) => {
@@ -107,6 +110,9 @@ export function useSessionMenuEntries(session: WorkspaceSession | undefined, { o
 	}
 	if (canResume) {
 		entries.push({ kind: "item", id: "session-resume", icon: <Play aria-hidden="true" />, label: t("command.resumeAgent"), onSelect: resume });
+	}
+	if (canMove) {
+		entries.push({ kind: "item", id: "session-move-to-cloud", icon: <ArrowRightLeft aria-hidden="true" />, label: t("move.menuItem"), onSelect: () => openMoveSession(session) });
 	}
 	entries.push({ kind: "separator", id: "session-links-sep" });
 	if (pr) {

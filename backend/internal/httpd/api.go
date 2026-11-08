@@ -32,6 +32,7 @@ type APIDeps struct {
 	AgentAccounts      controllers.AgentAccountService
 	Projects           projectsvc.Manager
 	Sessions           controllers.SessionService
+	SessionMoves       controllers.SessionMover
 	ArtifactVersions   controllers.ArtifactVersionService
 	Automations        controllers.AutomationService
 	DesktopWorkspaces  controllers.DesktopWorkspaceService
@@ -147,6 +148,7 @@ type API struct {
 	reports       *controllers.ReportsController
 	push          *controllers.PushController
 	imports       *controllers.ImportController
+	sessionMoves  *controllers.SessionMovesController
 	fs            *controllers.FSController
 	shellTerms    *controllers.ShellTerminalsController
 	cues          *controllers.CuesController
@@ -212,6 +214,7 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 		reports:       &controllers.ReportsController{Svc: deps.Reports},
 		push:          &controllers.PushController{Registry: deps.Push},
 		imports:       &controllers.ImportController{Svc: deps.Import},
+		sessionMoves:  &controllers.SessionMovesController{Svc: deps.SessionMoves},
 		fs:            &controllers.FSController{Svc: deps.Directories},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
 		cues:          &controllers.CuesController{Svc: deps.Cues},
@@ -240,7 +243,7 @@ func setupRoute(req *http.Request) bool {
 		return false
 	}
 	switch chi.RouteContext(req.Context()).RoutePattern() {
-	case "/api/v1/sessions", "/api/v1/orchestrators", "/api/v1/sessions/{sessionId}/restore":
+	case "/api/v1/sessions", "/api/v1/orchestrators", "/api/v1/sessions/{sessionId}/restore", "/api/v1/sessions/move/import":
 		return true
 	}
 	return false
@@ -299,13 +302,15 @@ func (a *API) Register(root chi.Router) {
 					// Setup steps' limits once it knows its project.
 					if setupRoute(req) {
 						budget := timeout
-						if attachmentUploadRoute(req) {
+						// A move from AO Cloud fetches its branch from origin before the spawn.
+						if attachmentUploadRoute(req) || chi.RouteContext(req.Context()).RoutePattern() == "/api/v1/sessions/move/import" {
 							budget = max(timeout, 10*time.Minute)
 						}
 						serveWithSetupBudget(next, w, req, budget)
 						return
 					}
-					if attachmentUploadRoute(req) {
+					// A move to AO Cloud pushes the branch to origin.
+					if attachmentUploadRoute(req) || chi.RouteContext(req.Context()).RoutePattern() == "/api/v1/sessions/{sessionId}/move/export" {
 						upload.ServeHTTP(w, req)
 						return
 					}
@@ -335,6 +340,7 @@ func (a *API) Register(root chi.Router) {
 			a.reports.Register(r)
 			a.push.Register(r)
 			a.imports.Register(r)
+			a.sessionMoves.Register(r)
 			a.fs.Register(r)
 			a.shellTerms.Register(r)
 			a.cues.Register(r)

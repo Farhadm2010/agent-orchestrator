@@ -227,7 +227,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
     client_request_id, client_request_hash, client_request_committed,
-    runtime_released_launch_id
+    runtime_released_launch_id, moved_to
 FROM sessions WHERE id = ?
 `
 
@@ -310,6 +310,7 @@ type GetSessionRow struct {
 	ClientRequestHash                string
 	ClientRequestCommitted           bool
 	RuntimeReleasedLaunchID          string
+	MovedTo                          string
 }
 
 func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessionRow, error) {
@@ -394,6 +395,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.ClientRequestHash,
 		&i.ClientRequestCommitted,
 		&i.RuntimeReleasedLaunchID,
+		&i.MovedTo,
 	)
 	return i, err
 }
@@ -417,7 +419,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
     client_request_id, client_request_hash, client_request_committed,
-    runtime_released_launch_id
+    runtime_released_launch_id, moved_to
 FROM sessions WHERE automation_run_id = ?
 `
 
@@ -500,6 +502,7 @@ type GetSessionByAutomationRunIDRow struct {
 	ClientRequestHash                string
 	ClientRequestCommitted           bool
 	RuntimeReleasedLaunchID          string
+	MovedTo                          string
 }
 
 func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRunID *domain.AutomationRunID) (GetSessionByAutomationRunIDRow, error) {
@@ -584,6 +587,7 @@ func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRun
 		&i.ClientRequestHash,
 		&i.ClientRequestCommitted,
 		&i.RuntimeReleasedLaunchID,
+		&i.MovedTo,
 	)
 	return i, err
 }
@@ -770,7 +774,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
     client_request_id, client_request_hash, client_request_committed,
-    runtime_released_launch_id
+    runtime_released_launch_id, moved_to
 FROM sessions ORDER BY project_id, num
 `
 
@@ -853,6 +857,7 @@ type ListAllSessionsRow struct {
 	ClientRequestHash                string
 	ClientRequestCommitted           bool
 	RuntimeReleasedLaunchID          string
+	MovedTo                          string
 }
 
 func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, error) {
@@ -943,6 +948,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.ClientRequestHash,
 			&i.ClientRequestCommitted,
 			&i.RuntimeReleasedLaunchID,
+			&i.MovedTo,
 		); err != nil {
 			return nil, err
 		}
@@ -1064,7 +1070,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
     client_request_id, client_request_hash, client_request_committed,
-    runtime_released_launch_id
+    runtime_released_launch_id, moved_to
 FROM sessions WHERE project_id IS ? ORDER BY num
 `
 
@@ -1147,6 +1153,7 @@ type ListSessionsByProjectRow struct {
 	ClientRequestHash                string
 	ClientRequestCommitted           bool
 	RuntimeReleasedLaunchID          string
+	MovedTo                          string
 }
 
 func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.ProjectID) ([]ListSessionsByProjectRow, error) {
@@ -1237,6 +1244,7 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.P
 			&i.ClientRequestHash,
 			&i.ClientRequestCommitted,
 			&i.RuntimeReleasedLaunchID,
+			&i.MovedTo,
 		); err != nil {
 			return nil, err
 		}
@@ -1832,6 +1840,24 @@ type SetSessionHibernatedParams struct {
 // controller change, or lifecycle write. Generic updates leave this fact alone.
 func (q *Queries) SetSessionHibernated(ctx context.Context, arg SetSessionHibernatedParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, setSessionHibernated, arg.HibernatedAt, arg.ID, arg.ExpectedRevision)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setSessionMovedTo = `-- name: SetSessionMovedTo :execrows
+UPDATE sessions SET moved_to = ?, updated_at = ? WHERE id = ?
+`
+
+type SetSessionMovedToParams struct {
+	MovedTo   string
+	UpdatedAt time.Time
+	ID        domain.SessionID
+}
+
+func (q *Queries) SetSessionMovedTo(ctx context.Context, arg SetSessionMovedToParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setSessionMovedTo, arg.MovedTo, arg.UpdatedAt, arg.ID)
 	if err != nil {
 		return 0, err
 	}
