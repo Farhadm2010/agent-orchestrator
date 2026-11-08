@@ -988,6 +988,10 @@ func New(d Deps) *Manager {
 // materialization fails the still-seed row is deleted outright; a later failure
 // parks the row as terminated and rolls back what was built.
 func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
+	if cfg.Transfer != nil {
+		// A moved conversation resumes in its CLI's terminal.
+		cfg.RequestedMode = domain.SessionModeTUI
+	}
 	if cfg.RequestedOutput == domain.RequestedOutputArtifact && m.artifactDir("") == "" {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", ErrArtifactOutputUnavailable)
 	}
@@ -1218,6 +1222,10 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		}
 	}
 	prompt, systemPrompt, err := m.buildSpawnTexts(ctx, cfg, id)
+	if cfg.Transfer != nil {
+		// The resumed conversation already holds the task; the prompt is a note about the move.
+		prompt = cfg.Prompt
+	}
 	if err != nil {
 		m.cleanupArtifactDir(id)
 		if prep != nil {
@@ -1361,6 +1369,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	}
 	if ws.Path == "" {
 		baseRefs := m.refreshDefaultBranchesBestEffort(ctx, project)
+		m.fetchRequestedBranchBestEffort(ctx, project, cfg.Branch)
 		ws, workspaceProject, err = m.createSessionWorkspace(ctx, project, cfg, id, branch, baseRefs)
 	}
 	if err != nil {
@@ -1396,6 +1405,13 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnAttachments, err)
 		}
 		prompt = appendAttachmentReferences(prompt, refs)
+	}
+
+	if cfg.Transfer != nil && cfg.Transfer.PreservedRef != "" {
+		if err := m.workspace.ApplyPreserved(ctx, ws, cfg.Transfer.PreservedRef); err != nil {
+			m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false, false)
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnTransfer, err)
+		}
 	}
 
 	// Everything above is shared: project, harness, prompts, seed row, worktree,
@@ -1479,6 +1495,19 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false, false)
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnPrepare, err)
 	}
+	transferNativeID := ""
+	if cfg.Transfer != nil {
+		if cfg.Transfer.NativeArchive != "" {
+			transferNativeID, err = m.placeTransferConversation(ctx, cfg.Harness, ws.Path, env, cfg.Transfer.NativeArchive)
+			if err != nil {
+				m.logger.Warn("spawn: moved conversation cannot be resumed; starting from the handoff note", "sessionID", id, "error", err)
+				transferNativeID = ""
+			}
+		}
+		if transferNativeID == "" {
+			prompt = cfg.Transfer.FallbackPrompt
+		}
+	}
 	launchCfg := ports.LaunchConfig{
 		DataDir:          m.dataDir,
 		SessionID:        string(id),
@@ -1505,7 +1534,12 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		}
 		launchCfg.Prompt = ""
 	}
-	argv, err := agent.GetLaunchCommand(ctx, launchCfg)
+	var argv []string
+	if transferNativeID != "" {
+		argv, err = transferRestoreArgv(ctx, agent, transferNativeID, launchCfg)
+	} else {
+		argv, err = agent.GetLaunchCommand(ctx, launchCfg)
+	}
 	if err != nil {
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnLaunchCommand, err)
@@ -1564,8 +1598,9 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		// The user-visible resolved selection is Model for regular harnesses and
 		// Mode for adapters whose catalog is a mode list (e.g. Amp). If an explicit
 		// Model override exists it wins; otherwise fall back to the resolved Mode.
-		Model:  resolvedModelForMetadata(cfg.Harness, agentConfig, adapterConfig),
-		Effort: agentConfig.Effort,
+		Model:          resolvedModelForMetadata(cfg.Harness, agentConfig, adapterConfig),
+		Effort:         agentConfig.Effort,
+		AgentSessionID: transferNativeID,
 	}
 	if prompt != "" {
 		metadata.LatestUserPromptAt = m.clock()
@@ -1917,6 +1952,26 @@ type defaultBranchRefreshTarget struct {
 	repoPath         string
 	configuredBranch string
 	resolved         ports.WorkspaceDefaultBranch
+}
+
+// fetchRequestedBranchBestEffort updates origin/<branch> for a branch the
+// caller named. Without it, a branch pushed from another machine but not yet
+// fetched here is treated as new and seeded from the default branch.
+func (m *Manager) fetchRequestedBranchBestEffort(ctx context.Context, project domain.ProjectRecord, branch string) {
+	if strings.TrimSpace(branch) == "" || project.Kind.WithDefault() != domain.ProjectKindSingleRepo || strings.TrimSpace(project.Path) == "" {
+		return
+	}
+	refresher, ok := m.workspace.(ports.WorkspaceDefaultBranchRefresher)
+	if !ok {
+		return
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, m.defaultBranchRefreshTimeout)
+	defer cancel()
+	target := ports.WorkspaceDefaultBranch{Remote: "origin", Branch: branch, BaseRef: "refs/remotes/origin/" + branch}
+	if err := refresher.FetchDefaultBranch(fetchCtx, project.Path, target); err != nil {
+		m.logger.Debug("spawn: requested branch fetch failed; continuing with local refs",
+			"projectID", project.ID, "branch", branch, "error", err)
+	}
 }
 
 func (m *Manager) refreshDefaultBranchesBestEffort(ctx context.Context, project domain.ProjectRecord) map[string]string {
@@ -3074,6 +3129,9 @@ func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (res
 	if !ok {
 		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, ErrNotFound)
 	}
+	if err := m.refuseMoved(ctx, id); err != nil {
+		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, err)
+	}
 	releaseHarness, err := m.beginHarnessUse(rec.Harness)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, err)
@@ -3377,6 +3435,9 @@ func (m *Manager) resumeAgentWithMode(ctx context.Context, id domain.SessionID, 
 	}
 	if !ok {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrNotFound)
+	}
+	if err := m.refuseMoved(ctx, id); err != nil {
+		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, err)
 	}
 	if rec.HibernatedAt != nil && m.persistentHostReconcileDone != nil {
 		select {

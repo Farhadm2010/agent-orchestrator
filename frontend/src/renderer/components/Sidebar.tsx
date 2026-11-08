@@ -46,6 +46,7 @@ import {
 	User,
 	X,
 	ArrowLeft,
+	Monitor,
 } from "@/components/app-icons";
 import {
 	useCallback,
@@ -92,7 +93,7 @@ import { hasTrustedApiBaseUrl } from "../lib/api-client";
 import { useCommandPaletteEnabled } from "../hooks/useCommandPaletteEnabled";
 import { useEdgeFade } from "../hooks/useEdgeFade";
 import { canResumeAgent, resumeAgentOnOpen, useCanResumeAgent } from "../hooks/useCanResumeAgent";
-import { cloudSessionsQueryKey, workspaceQueryKey, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
+import { cloudSessionsQueryKey, useRemoteWorkspaces, useWorkspaceQuery, workspaceQueryKey, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { useCloudOffering } from "../hooks/useCloudOffering";
 import { conversationQueryKey, conversationQueryOptions } from "../hooks/useConversation";
 import { usePinSession, useUnpinSession } from "../hooks/usePinSession";
@@ -123,6 +124,9 @@ import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import {
@@ -169,7 +173,10 @@ import { isLinuxPlatform, isMacPlatform } from "../lib/platform";
 import { useCloudSession } from "../lib/cloud-session";
 import type { RemoteHost } from "../hooks/useRemoteHosts";
 import { sessionNavigateTarget } from "../lib/navigate-to-session";
-import { sessionUiKey } from "../lib/hosts";
+import { LOCAL_HOST, sessionUiKey } from "../lib/hosts";
+import { hostsWithRepo } from "../lib/repo-hosts";
+import { useConnectedHosts } from "../hooks/useHostConnection";
+import { labelForHost } from "../lib/host-clients";
 import { RemoteHostsSection } from "./RemoteHostsSection";
 
 // macOS paints framed chrome: the fixed TitlebarNav cluster carries the
@@ -2087,6 +2094,7 @@ const ProjectItem = memo(function ProjectItem({
 														{isPinned ? t("shell.unpinProject") : t("shell.pinProject")}
 													</DropdownMenuItem>
 												) : null}
+												<AddToComputerMenuItems workspace={workspace} />
 												<DropdownMenuItem onSelect={() => selection.goSettings(workspace.id, workspace.cloudOrgId)}>
 													<Settings aria-hidden="true" />
 													{t("shell.projectSettings")}
@@ -3869,6 +3877,18 @@ function CreateProjectButton({
 	const folderDropRequest = useUiStore((state) => state.folderDropRequest);
 	const requestNewTask = useUiStore((state) => state.requestNewTask);
 	const [hostId, setHostId] = useState<string>();
+	// "Add to another computer" picks the host in the same render that opens the
+	// clone source, so the flow never prepares the clone on the previous host.
+	const cloneElsewhere = useUiStore((state) => state.cloneElsewhereRequest);
+	const [cloneNonce, setCloneNonce] = useState(cloneElsewhere?.nonce);
+	if (cloneElsewhere && cloneElsewhere.nonce !== cloneNonce) {
+		setCloneNonce(cloneElsewhere.nonce);
+		setHostId(cloneElsewhere.hostId === LOCAL_HOST ? undefined : cloneElsewhere.hostId);
+	}
+	const cloneSignal = useMemo(
+		() => (cloneElsewhere && cloneElsewhere.nonce === cloneNonce ? { source: "clone" as const, nonce: cloneElsewhere.nonce, remoteUrl: cloneElsewhere.remoteUrl } : null),
+		[cloneElsewhere, cloneNonce],
+	);
 	const host = remoteHosts?.find((candidate) => candidate.hostId === hostId);
 	return (
 		<CreateProjectFlow
@@ -3892,6 +3912,7 @@ function CreateProjectButton({
 			onInitializeProject={(path) => hostId ? onInitializeRemoteProject(hostId, path) : onInitializeProject(path)}
 			onOpenExistingProject={onOpenExistingProject}
 			openSignal={createProjectNonce}
+			sourceSignal={cloneSignal}
 		>
 			{({ disabled, choosePath, label }) => (
 				<Tooltip>
@@ -3938,5 +3959,34 @@ function CreateProjectListItem() {
 				<TooltipContent side="right">{t("shell.newProject")}</TooltipContent>
 			</Tooltip>
 		</SidebarMenuItem>
+	);
+}
+
+/** Clone this project's repository onto a connected computer that does not have it yet. */
+function AddToComputerMenuItems({ workspace }: { workspace: WorkspaceSummary }) {
+	const { t } = useTranslation();
+	const connected = useConnectedHosts();
+	const local = useWorkspaceQuery().data ?? [];
+	const remote = useRemoteWorkspaces().data ?? [];
+	const requestCloneElsewhere = useUiStore((state) => state.requestCloneElsewhere);
+	if (!workspace.repoKey || !workspace.repo) return null;
+	const present = new Set(hostsWithRepo(local, remote, workspace.repoKey).map((host) => host.hostId));
+	const candidates = [LOCAL_HOST, ...connected].filter((host) => !present.has(host));
+	if (candidates.length === 0) return null;
+	const repo = workspace.repo;
+	return (
+		<DropdownMenuSub>
+			<DropdownMenuSubTrigger>
+				<Monitor aria-hidden="true" />
+				{t("shell.addToComputer")}
+			</DropdownMenuSubTrigger>
+			<DropdownMenuSubContent>
+				{candidates.map((host) => (
+					<DropdownMenuItem key={host} onSelect={() => requestCloneElsewhere(host, repo)}>
+						{host === LOCAL_HOST ? t("remote.thisComputer") : labelForHost(host) ?? host}
+					</DropdownMenuItem>
+				))}
+			</DropdownMenuSubContent>
+		</DropdownMenuSub>
 	);
 }

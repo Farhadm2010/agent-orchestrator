@@ -299,6 +299,8 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 			name: project.name,
 			kind,
 			path: project.path,
+			repoKey: project.repoKey || undefined,
+			repo: project.repo || undefined,
 			folderMissing: project.folderMissing,
 			orchestratorAgent: project.orchestratorAgent ? toAgentProvider(project.orchestratorAgent) : undefined,
 			sessions: sessions
@@ -359,6 +361,8 @@ function toRemoteWorkspaces(
 		name: project.name,
 		kind: toProjectKind(project.kind),
 		path: project.path,
+		repoKey: project.repoKey || undefined,
+		repo: project.repo || undefined,
 		folderMissing: project.folderMissing,
 		orchestratorAgent: project.orchestratorAgent ? toAgentProvider(project.orchestratorAgent) : undefined,
 		sessions: sessions.filter((session) => session.projectId === project.id).map((session) => ({

@@ -96,6 +96,22 @@ type SpawnConfig struct {
 	// the desktop's New Task dialog is open. It is a hint: an absent or expired
 	// token falls back to ordinary workspace creation.
 	TaskPreparation domain.TaskPreparationToken
+	// Transfer, when set, continues a session moved from another machine
+	// instead of starting a new conversation.
+	Transfer *SpawnTransfer
+}
+
+// SpawnTransfer is the moved state a spawn continues. Prompt is delivered as
+// the first new turn of the resumed conversation.
+type SpawnTransfer struct {
+	// PreservedRef is a local ref holding the moved uncommitted work. It is
+	// applied after the worktree exists and before the agent starts.
+	PreservedRef string
+	// NativeArchive is a nativetransfer archive of the agent's conversation.
+	NativeArchive string
+	// FallbackPrompt starts the agent on a new conversation when the moved
+	// one cannot be resumed here.
+	FallbackPrompt string
 }
 
 // SpawnAttachment is a single file attached to a spawn request. Data holds the

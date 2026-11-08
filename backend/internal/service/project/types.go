@@ -12,6 +12,11 @@ type Summary struct {
 	OrchestratorAgent domain.AgentHarness `json:"orchestratorAgent,omitempty"`
 	ResolveError      string              `json:"resolveError,omitempty"`
 	FolderMissing     bool                `json:"folderMissing"`
+	// Repo is the checkout's origin URL.
+	Repo string `json:"repo"`
+	// RepoKey identifies the repository across machines (see domain.RepositoryKey).
+	// It is empty for workspace and scratch projects.
+	RepoKey string `json:"repoKey"`
 }
 
 // Project is the full read-model returned by GET /api/v1/projects/{id}.

@@ -472,6 +472,10 @@ export type WorkspaceSummary = {
 	kind?: ProjectKind | typeof CLOUD_PROJECT_KIND | typeof STANDALONE_PROJECT_KIND;
 	/** Local checkout path; empty string for cloud projects (no local folder). */
 	path: string;
+	/** Identifies the repository across machines; absent for workspace, scratch and Cloud projects. */
+	repoKey?: string;
+	/** The checkout's origin URL, for cloning the same repository elsewhere. */
+	repo?: string;
 	folderMissing?: boolean;
 	workspaceRepos?: WorkspaceRepoSummary[];
 	type?: "main" | "worktree";
