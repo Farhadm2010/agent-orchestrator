@@ -502,3 +502,67 @@ func TestSessionSearchStoresTextCompressedAndCutsSnippetsFromIt(t *testing.T) {
 		t.Fatalf("find bar matches = %+v (err %v), want one marked snippet", matches, err)
 	}
 }
+
+// Found while benchmarking the contentless index: removing rows by rowid
+// (contentless_delete) left them counting in term statistics, so after a
+// source was cleared or a document rewritten, bm25 scored the remaining
+// documents differently from a fresh index (-7.27 became -12.21 here).
+// Rows are removed with FTS5's 'delete' command and their indexed text now,
+// which keeps the statistics exact.
+func TestSessionSearchScoresAreUnchangedByDeletedDocuments(t *testing.T) {
+	ctx := context.Background()
+	corpus := func(source string, n int, filler string) []domain.SessionSearchDoc {
+		docs := make([]domain.SessionSearchDoc, n)
+		for i := range docs {
+			docs[i] = domain.SessionSearchDoc{
+				SourceKey: source, DocKey: fmt.Sprint(i), SessionID: fmt.Sprintf("%s-%d", source, i%5),
+				Kind: domain.SessionSearchKindUser, CreatedAt: testNow, IndexedAt: testNow,
+				Body: fmt.Sprintf("%s alpha beta gamma %d delta %s", filler, i, filler),
+			}
+		}
+		docs[0].Body = "needle zebra " + docs[0].Body
+		docs[1].Body = "needle " + docs[1].Body + " needle"
+		return docs
+	}
+	scores := func(churn bool) []float64 {
+		s := sqlitetest.MustOpenAt(t, t.TempDir())
+		if churn {
+			if err := s.UpsertSessionSearchDocs(ctx, corpus("old", 400, "needle")); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DeleteSessionSearchDocsForSource(ctx, "old"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		docs := corpus("new", 50, "other")
+		if err := s.UpsertSessionSearchDocs(ctx, docs); err != nil {
+			t.Fatal(err)
+		}
+		if churn {
+			// A rewritten document replaces its old index row too.
+			docs[2].Body = "needle needle needle " + docs[2].Body
+			if err := s.UpsertSessionSearchDocs(ctx, docs[2:3]); err != nil {
+				t.Fatal(err)
+			}
+			docs[2].Body = corpus("new", 50, "other")[2].Body
+			if err := s.UpsertSessionSearchDocs(ctx, docs[2:3]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		hits, err := s.SearchSessionSearchDocs(ctx, domain.SessionSearchParams{
+			MatchQuery: matchExpression("needle zebra"), Group: domain.SessionSearchGroupMessage,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]float64, len(hits))
+		for i, hit := range hits {
+			out[i] = hit.Rank
+		}
+		return out
+	}
+	fresh, churned := scores(false), scores(true)
+	if fmt.Sprint(fresh) != fmt.Sprint(churned) {
+		t.Fatalf("scores after deletes and rewrites %v, want the fresh index's %v", churned, fresh)
+	}
+}

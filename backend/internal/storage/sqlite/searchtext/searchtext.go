@@ -1,10 +1,14 @@
-package store
+// Package searchtext encodes the text of a session search document for
+// storage. The store writes it; the database layer registers ao_search_body()
+// so SQL (the index's delete trigger) can read it back.
+package searchtext
 
 import (
 	"bytes"
 	"compress/flate"
 	"hash/fnv"
 	"io"
+	"strings"
 	"sync"
 )
 
@@ -27,8 +31,8 @@ var searchBodyWriters = sync.Pool{New: func() any {
 	return writer
 }}
 
-// encodeSearchBody returns the stored form of a document's text.
-func encodeSearchBody(text string) []byte {
+// Encode returns the stored form of a document's text.
+func Encode(text string) []byte {
 	if text == "" {
 		return nil
 	}
@@ -51,9 +55,9 @@ func encodeSearchBody(text string) []byte {
 	return append(out, text...)
 }
 
-// decodeSearchBody returns the text of a stored body. A body that cannot be
+// Decode returns the text of a stored body. A body that cannot be
 // decoded reads as empty: it only costs that row its snippet.
-func decodeSearchBody(stored []byte) string {
+func Decode(stored []byte) string {
 	if len(stored) == 0 {
 		return ""
 	}
@@ -73,14 +77,27 @@ func decodeSearchBody(stored []byte) string {
 	}
 }
 
-// searchTextHash fingerprints what a document puts in the index. A pass that
+// Hash fingerprints what a document puts in the index. A pass that
 // re-reads an unchanged document compares hashes and leaves its index row
 // alone, which is what keeps incremental passes cheap.
-func searchTextHash(title, body, paths string) int64 {
+func Hash(title, body, paths string) int64 {
 	hasher := fnv.New64a()
 	for _, part := range []string{title, body, paths} {
 		_, _ = hasher.Write([]byte(part))
 		_, _ = hasher.Write([]byte{0})
 	}
 	return int64(hasher.Sum64()) //nolint:gosec // a fingerprint; wrapping is fine
+}
+
+// Normalize makes a document field safe to send to SQLite inside JSON and to
+// store: invalid UTF-8 becomes U+FFFD (JSON encoding would otherwise rewrite
+// it, and the index and the stored text would disagree) and NUL becomes a
+// space (SQLite text functions stop at NUL). The index row and the stored
+// text are written from the same normalized value, so deleting a row with its
+// stored text removes exactly what was indexed.
+func Normalize(value string) string {
+	if strings.IndexByte(value, 0) >= 0 {
+		value = strings.ReplaceAll(value, "\x00", " ")
+	}
+	return strings.ToValidUTF8(value, "\uFFFD")
 }

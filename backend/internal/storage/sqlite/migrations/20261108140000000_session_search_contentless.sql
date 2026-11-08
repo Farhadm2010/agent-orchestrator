@@ -57,24 +57,30 @@ CREATE TABLE session_search_text (
 -- +goose StatementEnd
 
 -- +goose StatementBegin
--- Contentless: the index keeps postings only. contentless_delete lets a row be
--- removed by rowid without supplying its original text.
+-- Contentless: the index keeps postings only. A row is removed with FTS5's
+-- 'delete' command and the exact text it was indexed with, read back from
+-- session_search_text. (contentless_delete would remove a row by rowid alone,
+-- but its tombstones keep counting in term statistics until segments merge,
+-- which moved bm25 scores after every edit or prune.)
 CREATE VIRTUAL TABLE session_search_fts USING fts5(
     title,
     body,
     paths,
     content='',
-    contentless_delete=1,
     tokenize='unicode61 remove_diacritics 2'
 );
 -- +goose StatementEnd
 
 -- +goose StatementBegin
--- Deleting a document removes its text and its index row, so a pruned or
--- cleared source can never leave a searchable orphan.
+-- Deleting a document removes its index row and its text, so a pruned or
+-- cleared source can never leave a searchable orphan. ao_search_body() is
+-- registered by the daemon (storage/sqlite/search_functions.go) and decodes
+-- the stored text the index row was built from.
 CREATE TRIGGER session_search_docs_ad AFTER DELETE ON session_search_docs BEGIN
+    INSERT INTO session_search_fts (session_search_fts, rowid, title, body, paths)
+    SELECT 'delete', t.id, t.title, ao_search_body(t.body), t.paths
+    FROM session_search_text t WHERE t.id = old.id;
     DELETE FROM session_search_text WHERE id = old.id;
-    DELETE FROM session_search_fts WHERE rowid = old.id;
 END;
 -- +goose StatementEnd
 

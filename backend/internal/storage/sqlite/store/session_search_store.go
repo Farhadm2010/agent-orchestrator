@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/searchtext"
 )
 
 // This file is the persistence half of session search. It writes only the three
@@ -499,7 +501,7 @@ func (s *Store) searchSessionSearchDocs(ctx context.Context, params domain.Sessi
 		if !params.SkipSnippets {
 			text := hit.Title
 			if hit.Kind != domain.SessionSearchKindTitle || hit.Title == "" {
-				text = decodeSearchBody(body)
+				text = searchtext.Decode(body)
 			}
 			hit.Snippet = domain.SessionSearchSnippet(text, params.HighlightTerms)
 		}
@@ -573,7 +575,7 @@ func (s *Store) BrowseSessionSearchDocs(ctx context.Context, params domain.Sessi
 		); err != nil {
 			return nil, fmt.Errorf("scan session search browse row: %w", err)
 		}
-		hit.Snippet = decodeSearchBody(preview)
+		hit.Snippet = searchtext.Decode(preview)
 		hit.Kind = domain.SessionSearchKind(kind)
 		hit.CreatedAt = time.UnixMilli(createdAt).UTC()
 		hits = append(hits, hit)
@@ -629,7 +631,7 @@ ORDER BY d.seq, d.id`,
 		}
 		hit.Kind = domain.SessionSearchKind(kind)
 		hit.CreatedAt = time.UnixMilli(createdAt).UTC()
-		hit.Snippet = domain.SessionSearchSnippet(decodeSearchBody(body), terms)
+		hit.Snippet = domain.SessionSearchSnippet(searchtext.Decode(body), terms)
 		hits = append(hits, hit)
 	}
 	if err := rows.Err(); err != nil {
@@ -707,25 +709,16 @@ ON CONFLICT (source_key, doc_key, kind) DO UPDATE SET
     indexed_at = excluded.indexed_at
 RETURNING id;`
 
-// upsertSessionSearchTextSQL stores a document's text: compressed, and with the
-// hash the next pass compares to decide whether the index row must change.
-const upsertSessionSearchTextSQL = `
-INSERT INTO session_search_text (id, title, paths, body, hash) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (id) DO UPDATE SET
-    title = excluded.title,
-    paths = excluded.paths,
-    body = excluded.body,
-    hash = excluded.hash;`
-
 // UpsertSessionSearchDocs writes one batch in a single transaction, so the
 // index and the projection advance together and a batch costs one commit.
 //
-// The index rows are written last and in one statement. FTS5 flushes its
-// pending terms whenever another statement opens a savepoint in the same
-// transaction; written one document at a time, each document became its own
-// index segment, and merging those segments was most of an indexing pass.
-// Every pass also re-reads documents that did not change; their hash matches
-// and their index rows are left alone.
+// The index is contentless, so a changed document's old index row is removed
+// with FTS5's 'delete' command and the text it was indexed with, read from
+// session_search_text before that text is overwritten. Text and index rows are
+// then written one statement each: FTS5 flushes its pending terms whenever
+// another statement opens a savepoint in the same transaction, and written one
+// document at a time, each document became its own index segment to merge.
+// Documents whose hash is unchanged keep their index rows.
 func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.SessionSearchDoc) error {
 	if len(docs) == 0 {
 		return nil
@@ -754,63 +747,72 @@ func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.Sessi
 		if err != nil {
 			return err
 		}
-		type indexRow struct {
-			id                 int64
-			title, body, paths string
+		// The last write of a document in the batch wins, as it did when each
+		// was written in turn.
+		latest := make(map[int64]int, len(docs))
+		for index := range docs {
+			latest[ids[index]] = index
 		}
-		changed := make([]indexRow, 0, len(docs))
+		textRows := make([][5]any, 0, len(docs))
+		indexRows := make([][4]any, 0, len(docs))
 		replaced := make([]int64, 0, len(docs))
-		seen := make(map[int64]bool, len(docs))
 		for index, doc := range docs {
 			id := ids[index]
-			hash := searchTextHash(doc.Title, doc.Body, doc.Paths)
-			previous, exists := stored[id]
-			if (exists && previous == hash) || seen[id] {
+			if latest[id] != index {
 				continue
 			}
-			seen[id] = true
+			title, body, paths := searchtext.Normalize(doc.Title), searchtext.Normalize(doc.Body), searchtext.Normalize(doc.Paths)
+			hash := searchtext.Hash(title, body, paths)
+			previous, exists := stored[id]
+			if exists && previous == hash {
+				continue
+			}
 			if exists {
 				replaced = append(replaced, id)
 			}
-			changed = append(changed, indexRow{id: id, title: doc.Title, body: doc.Body, paths: doc.Paths})
-			stored[id] = hash
+			textRows = append(textRows, [5]any{id, title, paths, hex.EncodeToString(searchtext.Encode(body)), hash})
+			indexRows = append(indexRows, [4]any{id, title, body, paths})
 		}
-		if len(changed) == 0 {
+		if len(textRows) == 0 {
 			return nil
 		}
-		textStmt, err := executor.PrepareContext(ctx, upsertSessionSearchTextSQL)
-		if err != nil {
-			return fmt.Errorf("prepare session search text upsert: %w", err)
-		}
-		defer func() { _ = textStmt.Close() }()
-		for _, row := range changed {
-			if _, err := textStmt.ExecContext(ctx, row.id, row.title, row.paths, encodeSearchBody(row.body), stored[row.id]); err != nil {
-				return fmt.Errorf("upsert session search text %d: %w", row.id, err)
-			}
-		}
 		if len(replaced) > 0 {
-			encoded, err := json.Marshal(replaced)
+			replacedIDs, err := json.Marshal(replaced)
 			if err != nil {
 				return fmt.Errorf("encode replaced session search rows: %w", err)
 			}
-			if _, err := executor.ExecContext(ctx,
-				`DELETE FROM session_search_fts WHERE rowid IN (SELECT value FROM json_each(?))`, string(encoded),
-			); err != nil {
+			if _, err := executor.ExecContext(ctx, `
+INSERT INTO session_search_fts (session_search_fts, rowid, title, body, paths)
+SELECT 'delete', t.id, t.title, ao_search_body(t.body), t.paths
+FROM session_search_text t
+WHERE t.id IN (SELECT value FROM json_each(?))`, string(replacedIDs)); err != nil {
 				return fmt.Errorf("remove replaced session search index rows: %w", err)
 			}
 		}
-		rows := make([][4]any, len(changed))
-		for index, row := range changed {
-			rows[index] = [4]any{row.id, row.title, row.body, row.paths}
+		encodedText, err := json.Marshal(textRows)
+		if err != nil {
+			return fmt.Errorf("encode session search text rows: %w", err)
 		}
-		encoded, err := json.Marshal(rows)
+		if _, err := executor.ExecContext(ctx, `
+INSERT INTO session_search_text (id, title, paths, body, hash)
+SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'),
+       unhex(json_extract(value, '$[3]')), json_extract(value, '$[4]')
+FROM json_each(?) WHERE true
+ON CONFLICT (id) DO UPDATE SET
+    title = excluded.title,
+    paths = excluded.paths,
+    body = excluded.body,
+    hash = excluded.hash`, string(encodedText)); err != nil {
+			return fmt.Errorf("store session search text: %w", err)
+		}
+		encodedIndex, err := json.Marshal(indexRows)
 		if err != nil {
 			return fmt.Errorf("encode session search index rows: %w", err)
 		}
 		if _, err := executor.ExecContext(ctx, `
 INSERT INTO session_search_fts (rowid, title, body, paths)
 SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'), json_extract(value, '$[3]')
-FROM json_each(?)`, string(encoded)); err != nil {
+FROM json_each(?)`, string(encodedIndex)); err != nil {
 			return fmt.Errorf("index session search docs: %w", err)
 		}
 		return nil
