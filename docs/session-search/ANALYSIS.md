@@ -1565,3 +1565,88 @@ times smaller; AO uses a quarter of the memory.
 those searches; Orca 100): keeping a head as well as the tail would close it.
 Typo repair would close the typo gap; it is on hold pending a decision.
 
+
+### 8.12 Closing the gaps the Orca comparison found (8 Nov 2026)
+
+Every recommendation from 8.11 was built or measured. Branch
+`ao/session-search-gaps`, on top of this one.
+
+| R@1, AO vs Orca | Before | Now | Orca |
+|---|---|---|---|
+| Real transcripts (321) | 91.3 | **98.4** | 71.0 |
+| Agentic (43) | **93.0** | **93.0** | 81.4 |
+| LongMemEval-S (470) | **88.3** | **88.3** | 86.8 |
+| LoCoMo (1,536) | **62.6** | **62.6** | 61.6 |
+| Agentic, one typo per query | 55.8 | **93.0** | 72.1 |
+| LongMemEval-S, one typo | 83.4 | **87.9** | 87.2 |
+| LoCoMo, one typo | 51.9 | **61.7** | 59.0 |
+
+**The index is half the size and stores text once.** The text table held a
+plain copy of every document that the FTS5 table used as external content: 121
+MB of text beside a 41 MB index on this Mac's archive, almost all command
+output. Snippets are cut in Go from the page's rows, so the text is now stored
+compressed (deflate above 256 bytes, `storage/sqlite/searchtext`) and the FTS5
+table is contentless (migration `20261108140000000`). A row is removed with
+FTS5's `delete` command and the exact text it was indexed with, decoded by
+`ao_search_body()`, a SQL function the daemon registers before opening the
+database. The first version used `contentless_delete`, which removes a row by
+rowid but leaves it counting in term statistics until segments merge; the
+benchmark caught it (LoCoMo fell from 62.6 to 60.1, its loader clears each
+corpus), and `TestSessionSearchScoresAreUnchangedByDeletedDocuments` pins
+scores after deletes to a fresh index's. On the real archive the text is 42 MB
+and the index 43 MB (it holds more now, below). On the 126 real transcripts the
+index is 54 MB instead of 72 (Orca 29).
+
+**Indexing is faster.** A profile showed FTS5 flushing its pending terms at
+every statement savepoint: written one document at a time, each document
+became its own segment, and merging them was most of a pass. Index rows and
+text rows are each written in one statement per batch now, batches are 256
+documents, and an unchanged document (same hash) keeps its index row. Same
+machine, same run: 9.7 s down to 8.5 s for 667 MB of transcripts. Orca's 2.9 s
+is mostly native SQLite against modernc's pure-Go translation, and V8's JSON
+against Go's. Peak memory rose from about 53 MB to about 72 MB (Orca 229 MB).
+
+**The start of long output is kept.** Native command output keeps a quarter
+of its 8 KiB from the start and the rest from the end; AO Chat output gets 6
+KiB, 1.5 from the start and 4.5 from the end, so its tail is no shorter than
+before (the E2E run caught a word 3.8 KiB from the end that a 3 KiB tail lost).
+Searches for words near the start of a long output: R@1 38.5 to 94.9, nothing
+found 46% to 5%.
+
+**Long messages are split, not cut.** A message past 8 KiB becomes up to 8
+chunks (64 KiB) with one message id, so a later chunk opens the message, and the
+row's match count strips the `#n` chunk suffix so a word in several chunks is
+one match.
+
+**Typos are repaired from the index vocabulary** (`sessionsearch/typos.go`,
+an `fts5vocab` table). A word that matches nothing as typed, by its stem or as
+a prefix is searched as the closest indexed word: same first letter, at least
+0.82 by edit distance with a swap counted once (Orca's threshold), compared by
+its start against longer words so a half-typed word with a typo is repaired
+("noatriz" to "notarize"), and each run of letters in an identifier on its own
+("dokcer-compose.yml"). The response lists `corrections`; the Search page, Cmd+K
+and `ao search` say what was searched, and the find bar steps through the
+corrected word. The suites without typos did not move.
+
+**Measured and not shipped.**
+
+- *The frequency-gap rule* (also repair a word found in a few documents when a
+  close word is far commoner) scored the same as zero-hit on the typo suites
+  and cost 3.1 points on real transcripts (98.4 to 95.3, worse on 10 searches,
+  better on none): those searches are rare words, and several were the person's
+  own misspellings in their messages ("wokrtree", "captuyre"), which must be
+  found as typed. It stays a benchmark variant.
+- *Choosing a session's row by its raw score* rather than the kind-weighted
+  one moved LoCoMo's "opens on the answer" from 28.7 to 29.0 and LongMemEval's
+  from 56.4 to 51.1. The row is chosen as before.
+- *Folding forks.* On this Mac, sessions sharing an opening are the same prompt
+  given to different sessions (one task run across agents, a templated issue
+  prompt), not forks; AO records no fork link, and a continuation is already one
+  session. Folding would hide distinct results.
+
+**End to end.** A daemon from this branch, fenced on a copy of this Mac's
+archive (50,947 documents): 222 of 226 graded searches pass (220 before).
+Warm Cmd+K p50 29 ms, p95 104 ms. Two of the four failures are typos that are
+themselves in the index (this session's own notes about the E2E cases), which
+the zero-hit rule leaves alone by design; two are cases whose data changed
+since they were written.
