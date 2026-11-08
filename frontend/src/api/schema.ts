@@ -4634,6 +4634,8 @@ export interface components {
             id: string;
             limits?: components["schemas"]["AgentAccountLimits"];
             loggedIn: boolean;
+            orgId?: string;
+            orgName?: string;
             plan?: string;
             problem?: string;
             /** @enum {string} */
