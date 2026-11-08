@@ -55,6 +55,7 @@ type Store interface {
 	ListInterruptedSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]bool, error)
 	ListPRsBySession(ctx context.Context, sessionID domain.SessionID) ([]domain.PullRequest, error)
 	ListReportedPRURLs(ctx context.Context, id domain.SessionID) ([]string, error)
+	ListRepositoryRenames(ctx context.Context) ([]domain.RepositoryRename, error)
 	ListSessionWorktrees(ctx context.Context, id domain.SessionID) ([]domain.SessionWorktreeRecord, error)
 	ListChecks(ctx context.Context, prURL string) ([]domain.PullRequestCheck, error)
 	ListPRReviews(ctx context.Context, prURL string) ([]domain.PullRequestReview, error)
@@ -262,6 +263,15 @@ type Service struct {
 	// runsOnComputerLogin reports whether a new session would launch on the
 	// computer's own CLI login rather than a saved account. Nil means always.
 	runsOnComputerLogin func(context.Context, domain.AgentHarness, string) bool
+	// githubRepos lets ClaimPR accept a PR on the repository a github.com
+	// origin was renamed or transferred to. Nil keeps exact origin matching.
+	githubRepos ports.GitHubRepositoryResolver
+}
+
+// SetGitHubRepositoryResolver late-binds the resolver ClaimPR uses to follow
+// a github.com origin's rename or transfer.
+func (s *Service) SetGitHubRepositoryResolver(r ports.GitHubRepositoryResolver) {
+	s.githubRepos = r
 }
 
 // SetComputerLoginCheck late-binds the account check the launch gate needs: the
@@ -1878,6 +1888,8 @@ func mapSessionError(err error) error {
 	case errors.Is(err, ports.ErrRuntimeCommandLineTooLong):
 		return apierr.Invalid("WINDOWS_COMMAND_LINE_TOO_LONG",
 			"The agent launch command exceeds the Windows size limit. Shorten the task or project instructions.", nil)
+	case errors.Is(err, ports.ErrChatPermissionModeUnsupported):
+		return apierr.Invalid("CHAT_PERMISSION_MODE_UNSUPPORTED", err.Error(), nil)
 	case errors.Is(err, ports.ErrChatUnsupported):
 		var capabilityErr *ports.ChatCapabilityError
 		if errors.As(err, &capabilityErr) {
