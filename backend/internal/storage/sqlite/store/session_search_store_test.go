@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -215,28 +216,26 @@ func TestSearchSessionSearchDocsDropsDeletedDocuments(t *testing.T) {
 	}
 }
 
-func TestPruneSessionSearchDocsBeforeKeepsCurrentPass(t *testing.T) {
+// A source with more documents than one delete batch is cleared in several
+// short transactions, and nothing of it is left.
+func TestDeleteSessionSearchDocsForSourceClearsInBatches(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	stale := testNow
-	fresh := testNow.Add(time.Minute)
-	seedSearchDoc(t, s, domain.SessionSearchDoc{
-		SourceKey: "chat:a", DocKey: "stale", SessionID: "a", Kind: domain.SessionSearchKindUser,
-		Body: "stale text", IndexedAt: stale,
-	})
-	seedSearchDoc(t, s, domain.SessionSearchDoc{
-		SourceKey: "chat:a", DocKey: "fresh", SessionID: "a", Kind: domain.SessionSearchKindUser,
-		Body: "fresh text", IndexedAt: fresh,
-	})
-	if err := s.PruneSessionSearchDocsBefore(ctx, "chat:a", fresh); err != nil {
-		t.Fatalf("PruneSessionSearchDocsBefore: %v", err)
+	docs := make([]domain.SessionSearchDoc, 100)
+	for i := range docs {
+		docs[i] = domain.SessionSearchDoc{
+			SourceKey: "chat:big", DocKey: fmt.Sprint(i), SessionID: "big", Kind: domain.SessionSearchKindUser,
+			Body: fmt.Sprintf("line %d of a long session", i), CreatedAt: testNow, IndexedAt: testNow,
+		}
 	}
-	count, err := s.CountSessionSearchDocsForSource(ctx, "chat:a")
-	if err != nil {
-		t.Fatalf("CountSessionSearchDocsForSource: %v", err)
+	if err := s.UpsertSessionSearchDocs(ctx, docs); err != nil {
+		t.Fatalf("UpsertSessionSearchDocs: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("remaining docs = %d, want only the fresh one", count)
+	if err := s.DeleteSessionSearchDocsForSource(ctx, "chat:big"); err != nil {
+		t.Fatalf("DeleteSessionSearchDocsForSource: %v", err)
+	}
+	if count, err := s.CountSessionSearchDocsForSource(ctx, "chat:big"); err != nil || count != 0 {
+		t.Fatalf("remaining docs = %d (err %v), want none", count, err)
 	}
 }
 
@@ -331,7 +330,7 @@ func TestUpsertSessionSearchDocsLeavesUnchangedTextAlone(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	s := sqlitetest.MustOpenAt(t, dir)
-	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "ao.db"))
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "search.db"))
 	if err != nil {
 		t.Fatalf("open raw database: %v", err)
 	}
@@ -472,7 +471,7 @@ func TestSessionSearchStoresTextCompressedAndCutsSnippetsFromIt(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	s := sqlitetest.MustOpenAt(t, dir)
-	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "ao.db"))
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "search.db"))
 	if err != nil {
 		t.Fatalf("open raw database: %v", err)
 	}
@@ -564,5 +563,136 @@ func TestSessionSearchScoresAreUnchangedByDeletedDocuments(t *testing.T) {
 	fresh, churned := scores(false), scores(true)
 	if fmt.Sprint(fresh) != fmt.Sprint(churned) {
 		t.Fatalf("scores after deletes and rewrites %v, want the fresh index's %v", churned, fresh)
+	}
+}
+
+// The index lives in its own database file, so a long index transaction (a
+// rebuild, an FTS5 merge) holds only that file's write lock: app writes and
+// searches go on while it runs. In ao.db those waited up to a second.
+func TestAppWritesAndSearchesDoNotWaitForTheIndexWriter(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s := sqlitetest.MustOpenAt(t, dir)
+	seedSearchDoc(t, s, domain.SessionSearchDoc{
+		SourceKey: "chat:a", DocKey: "m1", SessionID: "a", Kind: domain.SessionSearchKindUser, Body: "rotate the zzlocked key",
+	})
+
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "search.db"))
+	if err != nil {
+		t.Fatalf("open search database: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+	held, err := raw.Conn(ctx)
+	if err != nil {
+		t.Fatalf("search connection: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+	if _, err := held.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("take the index write lock: %v", err)
+	}
+	defer func() { _, _ = held.ExecContext(ctx, `ROLLBACK`) }()
+
+	started := time.Now()
+	seedProject(t, s, "written-while-indexing")
+	if took := time.Since(started); took > time.Second {
+		t.Fatalf("an app write took %v while the index writer held its lock", took)
+	}
+	parsed := domain.ParseSessionSearchQuery("zzlocked")
+	hits, err := s.SearchSessionSearchDocs(ctx, domain.SessionSearchParams{MatchQuery: parsed.MatchQuery, HighlightTerms: parsed.HighlightTerms})
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("search while the index writer held its lock: %d hits, err %v", len(hits), err)
+	}
+}
+
+// The index is derived data with its own schema version: a file written by
+// another version is cleared and rebuilt by the indexer instead of migrated.
+func TestTheIndexIsClearedWhenItsSchemaVersionChanges(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := sqlite.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	seedSearchDoc(t, s, domain.SessionSearchDoc{
+		SourceKey: "chat:a", DocKey: "m1", SessionID: "a", Kind: domain.SessionSearchKindUser, Body: "zzversioned text",
+	})
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "search.db"))
+	if err != nil {
+		t.Fatalf("open search database: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatalf("set version: %v", err)
+	}
+	_ = raw.Close()
+
+	s, err = sqlite.Open(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if count, err := s.CountSessionSearchDocs(ctx); err != nil || count != 0 {
+		t.Fatalf("documents after a version change = %d (err %v), want a cleared index", count, err)
+	}
+	seedSearchDoc(t, s, domain.SessionSearchDoc{
+		SourceKey: "chat:a", DocKey: "m1", SessionID: "a", Kind: domain.SessionSearchKindUser, Body: "zzversioned text",
+	})
+	parsed := domain.ParseSessionSearchQuery("zzversioned")
+	if hits, err := s.SearchSessionSearchDocs(ctx, domain.SessionSearchParams{MatchQuery: parsed.MatchQuery, HighlightTerms: parsed.HighlightTerms}); err != nil || len(hits) != 1 {
+		t.Fatalf("search after the rebuild: %d hits, err %v", len(hits), err)
+	}
+}
+
+// search.db indexes one ao.db. Beside a different one (a restored backup, a
+// swapped data directory) it is cleared, not left describing sessions that do
+// not exist there.
+func TestTheIndexIsClearedBesideADifferentAppDatabase(t *testing.T) {
+	ctx := context.Background()
+	dir, other := t.TempDir(), t.TempDir()
+	for _, d := range []string{dir, other} {
+		s, err := sqlite.Open(d)
+		if err != nil {
+			t.Fatalf("Open %s: %v", d, err)
+		}
+		if d == dir {
+			seedSearchDoc(t, s, domain.SessionSearchDoc{
+				SourceKey: "chat:a", DocKey: "m1", SessionID: "a", Kind: domain.SessionSearchKindUser, Body: "zzowned text",
+			})
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+	// Reopening the same pair keeps the index.
+	s, err := sqlite.Open(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if count, err := s.CountSessionSearchDocs(ctx); err != nil || count != 1 {
+		t.Fatalf("documents after reopening the same database = %d (err %v), want 1", count, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	swapped, err := os.ReadFile(filepath.Join(other, "ao.db"))
+	if err != nil {
+		t.Fatalf("read other database: %v", err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Remove(filepath.Join(dir, "ao.db"+suffix))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ao.db"), swapped, 0o600); err != nil {
+		t.Fatalf("swap database: %v", err)
+	}
+	s, err = sqlite.Open(dir)
+	if err != nil {
+		t.Fatalf("open beside the swapped database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if count, err := s.CountSessionSearchDocs(ctx); err != nil || count != 0 {
+		t.Fatalf("documents beside a different ao.db = %d (err %v), want a cleared index", count, err)
 	}
 }

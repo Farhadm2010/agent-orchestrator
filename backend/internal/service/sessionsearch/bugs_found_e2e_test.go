@@ -403,6 +403,17 @@ func TestADeletedSessionLeavesTheIndex(t *testing.T) {
 	if want := int64(1); coverage.IndexedSources != want {
 		t.Fatalf("indexed sources = %d, want %d: the deleted session's source must go too", coverage.IndexedSources, want)
 	}
+	// Deleting the session only recorded it; the next sweep removes its
+	// documents in short transactions, so nothing of it stays in the index.
+	if _, err := f.svc.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if count, err := f.store.CountSessionSearchDocsForSource(ctx, sessionsearch.ChatSourceKey(string(session.ID))); err != nil || count != 0 {
+		t.Fatalf("documents left for the deleted session = %d (err %v)", count, err)
+	}
+	if orphans, err := f.store.SessionSearchOrphanSessions(ctx, 10); err != nil || len(orphans) != 0 {
+		t.Fatalf("deleted sessions still pending cleanup = %v (err %v)", orphans, err)
+	}
 }
 
 // Tool details are provider JSON. Indexed raw, snippets showed escapes such as

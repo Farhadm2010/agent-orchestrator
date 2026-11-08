@@ -2,7 +2,9 @@ package domain
 
 import (
 	"fmt"
+	"hash/fnv"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -127,6 +129,31 @@ type SessionSearchDoc struct {
 	Paths     string
 	CreatedAt time.Time
 	IndexedAt time.Time
+}
+
+// Fingerprint identifies everything a document stores except when it was
+// indexed. A pass compares it with the stored one and writes only documents
+// that changed, so an active session's new message does not rewrite the rest.
+func (d SessionSearchDoc) Fingerprint() int64 {
+	hasher := fnv.New64a()
+	for _, part := range []string{
+		d.SourceKey, d.DocKey, d.SessionID, d.ProjectID, d.Harness, d.Machine, string(d.Kind), d.MessageID,
+		strconv.FormatInt(d.Seq, 10), d.Title, d.Body, d.Paths, strconv.FormatInt(d.CreatedAt.UnixMilli(), 10),
+	} {
+		_, _ = hasher.Write([]byte(part))
+		_, _ = hasher.Write([]byte{0})
+	}
+	// 0 is the stored default of a row written before fingerprints.
+	return int64(hasher.Sum64() | 1) //nolint:gosec // a fingerprint; wrapping is fine
+}
+
+// SessionSearchDocRef is a stored document as a pass compares it: its row id,
+// its key within the source, and its fingerprint.
+type SessionSearchDocRef struct {
+	ID          int64
+	DocKey      string
+	Kind        SessionSearchKind
+	Fingerprint int64
 }
 
 // SessionSearchSource is the incremental cursor and health of one source.

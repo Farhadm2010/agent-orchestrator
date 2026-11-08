@@ -54,11 +54,7 @@ func TestIndexFootprintStaysSmallRelativeToSourceText(t *testing.T) {
 		t.Fatalf("IndexAll: %v", err)
 	}
 
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "ao.db"))
-	if err != nil {
-		t.Fatalf("open raw database: %v", err)
-	}
-	defer func() { _ = db.Close() }()
+	db := openRawWithIndex(t, dir)
 	var indexText, sourceText int64
 	if err := db.QueryRow(
 		`SELECT COALESCE(SUM(LENGTH(body) + LENGTH(paths) + LENGTH(title)), 0) FROM session_search_text`,
@@ -98,11 +94,7 @@ func TestOneHugeCommandIsBounded(t *testing.T) {
 		t.Fatalf("IndexChat: %v", err)
 	}
 
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "ao.db"))
-	if err != nil {
-		t.Fatalf("open raw database: %v", err)
-	}
-	defer func() { _ = db.Close() }()
+	db := openRawWithIndex(t, dir)
 	var maxBody int64
 	if err := db.QueryRow(
 		`SELECT COALESCE(MAX(LENGTH(body)), 0) FROM session_search_text`,
@@ -156,4 +148,20 @@ func TestIndexingStoresDocumentsAndTracksTheSource(t *testing.T) {
 	if source.Stamp == "" {
 		t.Fatal("no stamp recorded; the sweep would re-read every conversation forever")
 	}
+}
+
+// openRawWithIndex opens ao.db with the search database attached, as the
+// store's readers see them.
+func openRawWithIndex(t *testing.T, dir string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "ao.db"))
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`ATTACH DATABASE ? AS searchidx`, filepath.Join(dir, "search.db")); err != nil {
+		t.Fatalf("attach search database: %v", err)
+	}
+	return db
 }

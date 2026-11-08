@@ -62,7 +62,7 @@ func TestSearchBenchmarkRealLatency(t *testing.T) {
 	docs, _ := store.CountSessionSearchDocs(context.Background())
 	t.Logf("backfill: %d documents written (%d indexed) in %s", written, docs, time.Since(started).Round(time.Millisecond))
 
-	raw, err := sql.Open("sqlite", "file:"+snapshot)
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "search.db"))
 	if err != nil {
 		t.Fatalf("open snapshot for size: %v", err)
 	}

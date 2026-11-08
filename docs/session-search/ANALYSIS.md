@@ -147,8 +147,10 @@ step — reusing the scroll/highlight path rather than duplicating it.
 
 ### 2.1 Index store
 
-A dedicated FTS5 index in the same SQLite database (new migration), owned by a
-new `sessionsearch` package:
+A dedicated FTS5 index, owned by a new `sessionsearch` package. It was first
+planned in the same SQLite database; it now has its own file, `search.db`
+beside `ao.db`, so its writes never hold the app's write lock (§8.13). The
+first plan, kept for the record:
 
 - `session_search_docs` — one row per indexable unit: `id`, `source_key`,
   `doc_key`, `session_id`, `project_id`, `harness`, `kind`, `message_id`,
@@ -1497,6 +1499,10 @@ later. `TestADeletedSessionLeavesTheIndex` deletes an archived session the way
 main does. Afterwards its words find nothing and only the kept session's source
 remains. Without the trigger, the deleted session is still found.
 
+(Since §8.13 the trigger only records the deleted id in `session_search_deleted`,
+one row in the delete's transaction. Search ignores that session at once, and
+the next sweep removes its documents from `search.db`.)
+
 ### 8.10 A match below a folded message's fold (5 Nov 2026)
 
 Main now folds a long user message to about ten lines behind Show more
@@ -1650,3 +1656,93 @@ Warm Cmd+K p50 29 ms, p95 104 ms. Two of the four failures are typos that are
 themselves in the index (this session's own notes about the E2E cases), which
 the zero-hit rule leaves alone by design; two are cases whose data changed
 since they were written.
+
+### 8.13 The index gets its own database file (8 Nov 2026)
+
+**Why.** SQLite allows one writer per database file, and every write the
+daemon makes (chat streaming, session state, PR updates) goes through
+`ao.db`'s single writer connection. A review of the search tables on a copy of
+this Mac's archive (1.2 GB, 50,944 documents) timed a tiny app write running
+beside each search operation. While the index lived in `ao.db`, a full rebuild
+made app writes wait up to 131 ms. 338 of its transactions held the lock for
+more than 5 ms, from FTS5 segment merges and WAL checkpoints inside its commits.
+(Earlier figures of up to 1.16 s came from an APFS clone of the database, where
+every checkpoint also paid copy-on-write. Those numbers are from a full copy.)
+
+**What was tried first, and why it was not enough.**
+
+- *Smaller, adaptive transactions* (sized to a 4 ms budget) shortened the
+  median, but FTS5 merges segments inside whichever commit crosses a
+  threshold. Commits still had a 36 ms p99 and occasional 140 ms tails.
+- *Explicit, bounded merge steps* are not bounded in practice: 4-page steps
+  took up to 471 ms. With automerge off the p99 fell to 6.6 ms, but segments
+  piled up until a crisis merge held the lock for 456 ms.
+- *Checkpointing from another connection* (the writer opened with
+  `wal_autocheckpoint(0)`) starved: the log can only rewind when a write starts
+  after a pass that copied everything, and new frames arrive during every pass,
+  so the WAL grew to 865 MB during a rebuild and slowed every write. A hybrid
+  that copied the tail on the writer kept it bounded, but its tails reached
+  366 ms.
+
+None of these keeps the index's write work out of the app's lock, so the
+index moved out of the app's file.
+
+**What changed.**
+
+- `storage/sqlite/search_db.go` opens `search.db` with its own single writer
+  and its own schema, versioned with `PRAGMA user_version`. A different
+  version is cleared and rebuilt by the indexer, so index changes never need
+  an `ao.db` migration.
+- Every reader connection attaches `search.db` (a `driver.Connector` runs
+  `ATTACH` on connect). SQLite resolves the index's table names in the
+  attached file, so queries still filter documents by their sessions without
+  changing.
+- Migration `20261108200000000_session_search_lock_budget.sql` drops the old
+  in-file tables. All that stays in `ao.db` is `session_search_deleted`: the
+  `sessions` delete trigger records the id there (one row), search excludes
+  those sessions at once, and the sweep removes their documents from
+  `search.db` in batches.
+- Text is normalised, hashed and compressed before a transaction begins, not
+  inside it.
+- Each document stores a fingerprint, so a pass writes only the documents
+  whose content changed and deletes only the ones that disappeared. Before, it
+  rewrote the source and pruned by time.
+- When a conversation's stamp moves but nothing searchable changed (a revision
+  or status bump), the new stamp is recorded. Before, every later sweep
+  re-read the conversation: 27 MB for the largest one.
+- Two indexes no query used are gone (`source_key` leads the unique key; the
+  project filter applies after the full-text match).
+
+**Measured** on the same archive copy, with a tiny app write running every
+5 ms throughout:
+
+| While search is | App write wait, worst (index in ao.db) | Now |
+| --- | --- | --- |
+| Building the whole index (50,944 docs) | 131 ms (rebuild) | **4.7 ms** |
+| Rebuilding after a clear | 131 ms, 19.2 s | **8.2 ms** (mean 0.08 ms), 13.1 s |
+| Re-indexing an edit in the biggest conversation | rewrote 7,547 docs | **1 doc**, 0.5 ms |
+| Idle sweeps | under 2 ms | under 2 ms |
+| Cleaning up a deleted session | cascade inside the delete | 0.5 ms |
+
+Search's own transactions still take up to a few hundred milliseconds during
+a rebuild, but they hold only `search.db`'s lock, which nothing else takes,
+and WAL readers never wait for it.
+
+**Tests.**
+- `TestAppWritesAndSearchesDoNotWaitForTheIndexWriter` holds the index's write
+  lock and checks that an app write and a search both go through.
+- `TestTheIndexIsClearedWhenItsSchemaVersionChanges` covers the schema version.
+- `TestAnEditWritesOnlyTheEditedDocument` (1 write, not 61),
+  `TestARollbackDeletesOnlyTheDiscardedDocuments`,
+  `TestAChangeTheIndexCannotSeeRecordsTheNewStamp` and the extended
+  `TestADeletedSessionLeavesTheIndex` cover incremental writes.
+
+**What still stalls app writes, and is not search.**
+
+- `DeleteTerminatedSession` (main's session delete) holds the writer for
+  300 to 800 ms on a long session, cascading its conversations.
+- SQLite's auto-checkpoint runs inside whichever app commit grows the WAL past
+  1,000 pages, about 20 ms on this archive.
+- A database that ran this branch before this change keeps the dropped
+  index's free pages in `ao.db` until a `VACUUM`. Main never had them.
+

@@ -389,7 +389,9 @@ func (s *Service) indexOpenCodeSession(ctx context.Context, target domain.Sessio
 			IndexedAt: now,
 		})
 	}
-	if err := s.writeDocs(ctx, docs); err != nil {
+	// A transcript is read forward from its cursor, so its documents only grow:
+	// nothing is deleted here, and unchanged ones (the title) are not rewritten.
+	if _, err := s.writeChanged(ctx, sourceKey, docs, false); err != nil {
 		s.recordSourceError(ctx, sourceKey, domain.SessionSearchSourceNative, target, err)
 		return false
 	}

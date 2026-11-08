@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,9 @@ import (
 // count, so the two can never disagree about what matched. It expects the
 // documents table aliased as d; sessionSearchFilterArgs supplies its arguments.
 const sessionSearchFilterSQL = `
+  -- A deleted session's documents are removed after it, in batches; until
+  -- then they are not results.
+  AND d.session_id NOT IN (SELECT session_id FROM session_search_deleted)
   AND (? = '' OR d.project_id = ?)
   AND (? = '' OR d.harness = ?)
   AND (? = '' OR d.machine = ?)
@@ -696,8 +700,8 @@ func (s *Store) CountSessionSearchDocs(ctx context.Context) (int64, error) {
 const upsertSessionSearchDocSQL = `
 INSERT INTO session_search_docs (
     source_key, doc_key, session_id, project_id, harness, machine, kind, message_id, seq,
-    created_at, indexed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, indexed_at, fingerprint
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (source_key, doc_key, kind) DO UPDATE SET
     session_id = excluded.session_id,
     project_id = excluded.project_id,
@@ -706,7 +710,8 @@ ON CONFLICT (source_key, doc_key, kind) DO UPDATE SET
     message_id = excluded.message_id,
     seq = excluded.seq,
     created_at = excluded.created_at,
-    indexed_at = excluded.indexed_at
+    indexed_at = excluded.indexed_at,
+    fingerprint = excluded.fingerprint
 RETURNING id;`
 
 // UpsertSessionSearchDocs writes one batch in a single transaction, so the
@@ -723,11 +728,14 @@ func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.Sessi
 	if len(docs) == 0 {
 		return nil
 	}
-	return s.inTxDB(ctx, "upsert session search docs", func(_ *gen.Queries, tx gen.DBTX) error {
-		executor := tx
-		if executor == nil {
-			executor = s.writeDB
-		}
+	// Everything that is not SQL happens before the transaction: normalising,
+	// hashing, compressing and encoding a batch's text is CPU time the index's
+	// writer would otherwise hold its lock for.
+	prepared, err := prepareSessionSearchDocs(docs)
+	if err != nil {
+		return err
+	}
+	return s.inSearchTx(ctx, "upsert session search docs", func(executor *sql.Tx) error {
 		docStmt, err := executor.PrepareContext(ctx, upsertSessionSearchDocSQL)
 		if err != nil {
 			return fmt.Errorf("prepare session search upsert: %w", err)
@@ -738,7 +746,7 @@ func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.Sessi
 			if err := docStmt.QueryRowContext(ctx,
 				doc.SourceKey, doc.DocKey, doc.SessionID, doc.ProjectID, doc.Harness,
 				doc.Machine, string(doc.Kind), doc.MessageID, doc.Seq,
-				doc.CreatedAt.UnixMilli(), doc.IndexedAt.UnixMilli(),
+				doc.CreatedAt.UnixMilli(), doc.IndexedAt.UnixMilli(), prepared[index].fingerprint,
 			).Scan(&ids[index]); err != nil {
 				return fmt.Errorf("upsert session search doc %s/%s: %w", doc.SourceKey, doc.DocKey, err)
 			}
@@ -753,27 +761,25 @@ func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.Sessi
 		for index := range docs {
 			latest[ids[index]] = index
 		}
-		textRows := make([][5]any, 0, len(docs))
-		indexRows := make([][4]any, 0, len(docs))
+		var textRows, indexRows jsonRows
 		replaced := make([]int64, 0, len(docs))
-		for index, doc := range docs {
+		for index := range docs {
 			id := ids[index]
 			if latest[id] != index {
 				continue
 			}
-			title, body, paths := searchtext.Normalize(doc.Title), searchtext.Normalize(doc.Body), searchtext.Normalize(doc.Paths)
-			hash := searchtext.Hash(title, body, paths)
+			doc := prepared[index]
 			previous, exists := stored[id]
-			if exists && previous == hash {
+			if exists && previous == doc.hash {
 				continue
 			}
 			if exists {
 				replaced = append(replaced, id)
 			}
-			textRows = append(textRows, [5]any{id, title, paths, hex.EncodeToString(searchtext.Encode(body)), hash})
-			indexRows = append(indexRows, [4]any{id, title, body, paths})
+			textRows.add(id, doc.textRow)
+			indexRows.add(id, doc.indexRow)
 		}
-		if len(textRows) == 0 {
+		if textRows.empty() {
 			return nil
 		}
 		if len(replaced) > 0 {
@@ -789,10 +795,6 @@ WHERE t.id IN (SELECT value FROM json_each(?))`, string(replacedIDs)); err != ni
 				return fmt.Errorf("remove replaced session search index rows: %w", err)
 			}
 		}
-		encodedText, err := json.Marshal(textRows)
-		if err != nil {
-			return fmt.Errorf("encode session search text rows: %w", err)
-		}
 		if _, err := executor.ExecContext(ctx, `
 INSERT INTO session_search_text (id, title, paths, body, hash)
 SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'),
@@ -802,22 +804,91 @@ ON CONFLICT (id) DO UPDATE SET
     title = excluded.title,
     paths = excluded.paths,
     body = excluded.body,
-    hash = excluded.hash`, string(encodedText)); err != nil {
+    hash = excluded.hash`, textRows.String()); err != nil {
 			return fmt.Errorf("store session search text: %w", err)
-		}
-		encodedIndex, err := json.Marshal(indexRows)
-		if err != nil {
-			return fmt.Errorf("encode session search index rows: %w", err)
 		}
 		if _, err := executor.ExecContext(ctx, `
 INSERT INTO session_search_fts (rowid, title, body, paths)
 SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'), json_extract(value, '$[3]')
-FROM json_each(?)`, string(encodedIndex)); err != nil {
+FROM json_each(?)`, indexRows.String()); err != nil {
 			return fmt.Errorf("index session search docs: %w", err)
 		}
 		return nil
 	})
 }
+
+// inSearchTx runs fn in one transaction on the search database's writer.
+func (s *Store) inSearchTx(ctx context.Context, what string, fn func(*sql.Tx) error) error {
+	tx, err := s.searchWriter().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin %s: %w", what, err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit %s: %w", what, err)
+	}
+	return nil
+}
+
+// preparedSessionSearchDoc is a document's text ready to write: hashed,
+// compressed and encoded as the tail of its JSON row, after the row id.
+type preparedSessionSearchDoc struct {
+	fingerprint int64
+	hash        int64
+	textRow     []byte // ,title,paths,hex(compressed body),hash]
+	indexRow    []byte // ,title,body,paths]
+}
+
+func prepareSessionSearchDocs(docs []domain.SessionSearchDoc) ([]preparedSessionSearchDoc, error) {
+	prepared := make([]preparedSessionSearchDoc, len(docs))
+	for index, doc := range docs {
+		title, body, paths := searchtext.Normalize(doc.Title), searchtext.Normalize(doc.Body), searchtext.Normalize(doc.Paths)
+		hash := searchtext.Hash(title, body, paths)
+		textRow, err := json.Marshal([4]any{title, paths, hex.EncodeToString(searchtext.Encode(body)), hash})
+		if err != nil {
+			return nil, fmt.Errorf("encode session search text row: %w", err)
+		}
+		indexRow, err := json.Marshal([3]any{title, body, paths})
+		if err != nil {
+			return nil, fmt.Errorf("encode session search index row: %w", err)
+		}
+		prepared[index] = preparedSessionSearchDoc{
+			fingerprint: doc.Fingerprint(),
+			hash:        hash,
+			textRow:     jsonArrayTail(textRow),
+			indexRow:    jsonArrayTail(indexRow),
+		}
+	}
+	return prepared, nil
+}
+
+// jsonArrayTail turns an encoded array ["a",...] into ,"a",...] so a row id
+// can be put in front of it.
+func jsonArrayTail(encoded []byte) []byte {
+	encoded[0] = ','
+	return encoded
+}
+
+// jsonRows builds a JSON array of [id, ...] rows from pre-encoded row tails.
+type jsonRows struct{ b []byte }
+
+func (r *jsonRows) add(id int64, tail []byte) {
+	if r.b == nil {
+		r.b = append(r.b, '[')
+	} else {
+		r.b = append(r.b, ',')
+	}
+	r.b = append(r.b, '[')
+	r.b = strconv.AppendInt(r.b, id, 10)
+	r.b = append(r.b, tail...)
+}
+
+func (r *jsonRows) empty() bool { return r.b == nil }
+
+func (r *jsonRows) String() string { return string(r.b) + "]" }
 
 // SessionSearchVocabDocs reports how many documents hold a term starting with
 // prefix, summed over those terms (a document holding two such terms counts
@@ -886,26 +957,113 @@ func sessionSearchStoredHashes(ctx context.Context, executor gen.DBTX, ids []int
 	return hashes, rows.Err()
 }
 
-// PruneSessionSearchDocsBefore removes documents for one source that were not
-// rewritten by the current pass. A pass stamps every document it writes with its
-// own timestamp, so "older than this pass" is exactly "no longer visible". It is
-// what makes an edit, a rollback, or a deleted message disappear from results
-// without needing a diff of every document key.
-func (s *Store) PruneSessionSearchDocsBefore(ctx context.Context, sourceKey string, indexedAt time.Time) error {
-	if _, err := s.writeDB.ExecContext(ctx,
-		`DELETE FROM session_search_docs WHERE source_key = ? AND indexed_at < ?`, sourceKey, indexedAt.UnixMilli(),
-	); err != nil {
-		return fmt.Errorf("prune session search docs: %w", err)
+// sessionSearchDeleteBatch bounds one delete transaction on the search
+// database. Removing a document also removes its index row, which re-reads and
+// decompresses its text, so a large delete is many transactions rather than one
+// that keeps search readers' snapshots and the -wal file growing.
+const sessionSearchDeleteBatch = 256
+
+// SessionSearchSourceDocs lists a source's stored documents (id, key and
+// fingerprint), so a pass can write only what changed and delete only what
+// disappeared. It reads; it takes no write lock.
+func (s *Store) SessionSearchSourceDocs(ctx context.Context, sourceKey string) ([]domain.SessionSearchDocRef, error) {
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT id, doc_key, kind, fingerprint FROM session_search_docs WHERE source_key = ?`, sourceKey)
+	if err != nil {
+		return nil, fmt.Errorf("list session search source docs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []domain.SessionSearchDocRef
+	for rows.Next() {
+		var ref domain.SessionSearchDocRef
+		var kind string
+		if err := rows.Scan(&ref.ID, &ref.DocKey, &kind, &ref.Fingerprint); err != nil {
+			return nil, fmt.Errorf("scan session search source doc: %w", err)
+		}
+		ref.Kind = domain.SessionSearchKind(kind)
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// DeleteSessionSearchDocsByID removes documents by id, sessionSearchDeleteBatch
+// per transaction.
+func (s *Store) DeleteSessionSearchDocsByID(ctx context.Context, ids []int64) error {
+	for start := 0; start < len(ids); start += sessionSearchDeleteBatch {
+		encoded, err := json.Marshal(ids[start:min(start+sessionSearchDeleteBatch, len(ids))])
+		if err != nil {
+			return fmt.Errorf("encode session search ids: %w", err)
+		}
+		if _, err := s.searchWriter().ExecContext(ctx,
+			`DELETE FROM session_search_docs WHERE id IN (SELECT value FROM json_each(?))`, string(encoded),
+		); err != nil {
+			return fmt.Errorf("delete session search docs: %w", err)
+		}
 	}
 	return nil
 }
 
-// DeleteSessionSearchDocsForSource clears one source before a full re-index.
+// deleteSessionSearchDocsWhere removes the documents matching one column, a
+// batch per transaction, until none are left.
+func (s *Store) deleteSessionSearchDocsWhere(ctx context.Context, column, value string) error {
+	query := `DELETE FROM session_search_docs WHERE id IN (
+    SELECT id FROM session_search_docs WHERE ` + column + ` = ? LIMIT ?)`
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		result, err := s.searchWriter().ExecContext(ctx, query, value, sessionSearchDeleteBatch)
+		if err != nil {
+			return fmt.Errorf("delete session search docs by %s: %w", column, err)
+		}
+		if removed, err := result.RowsAffected(); err != nil || removed < sessionSearchDeleteBatch {
+			return err
+		}
+	}
+}
+
+// DeleteSessionSearchDocsForSource clears one source before a full re-index,
+// in short transactions.
 func (s *Store) DeleteSessionSearchDocsForSource(ctx context.Context, sourceKey string) error {
-	if _, err := s.writeDB.ExecContext(ctx,
-		`DELETE FROM session_search_docs WHERE source_key = ?`, sourceKey,
+	return s.deleteSessionSearchDocsWhere(ctx, "source_key", sourceKey)
+}
+
+// SessionSearchOrphanSessions lists up to limit deleted sessions whose search
+// documents are not removed yet. Deleting a session only records its id (a
+// long session has thousands of documents, too many for that transaction);
+// the indexer removes them afterwards, and search ignores them meanwhile.
+func (s *Store) SessionSearchOrphanSessions(ctx context.Context, limit int) ([]string, error) {
+	rows, err := s.readDB.QueryContext(ctx, `SELECT session_id FROM session_search_deleted LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list session search orphans: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan session search orphan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// DeleteSessionSearchSession removes a deleted session's documents, in short
+// transactions, then its sources.
+func (s *Store) DeleteSessionSearchSession(ctx context.Context, sessionID string) error {
+	if err := s.deleteSessionSearchDocsWhere(ctx, "session_id", sessionID); err != nil {
+		return err
+	}
+	if _, err := s.searchWriter().ExecContext(ctx,
+		`DELETE FROM session_search_sources WHERE session_id = ?`, sessionID,
 	); err != nil {
-		return fmt.Errorf("delete session search source docs: %w", err)
+		return fmt.Errorf("delete session search sources: %w", err)
+	}
+	if _, err := s.writeDB.ExecContext(ctx,
+		`DELETE FROM session_search_deleted WHERE session_id = ?`, sessionID,
+	); err != nil {
+		return fmt.Errorf("clear deleted session %s: %w", sessionID, err)
 	}
 	return nil
 }
@@ -944,7 +1102,7 @@ ON CONFLICT (source_key) DO UPDATE SET
 
 // UpsertSessionSearchSource records a source's cursor and health.
 func (s *Store) UpsertSessionSearchSource(ctx context.Context, source domain.SessionSearchSource) error {
-	if _, err := s.writeDB.ExecContext(ctx, upsertSessionSearchSourceSQL,
+	if _, err := s.searchWriter().ExecContext(ctx, upsertSessionSearchSourceSQL,
 		source.SourceKey, string(source.Kind), source.SessionID, source.ProjectID, source.Harness,
 		source.Path, source.CursorValue, source.FileSize, source.FileMtime, source.Fingerprint, source.Stamp, source.DocCount,
 		string(source.State), source.LastErrorCode, source.UpdatedAt.UnixMilli(),
@@ -985,7 +1143,8 @@ FROM session_search_sources WHERE source_key = ?`, sourceKey,
 // which sources it cannot read instead of silently returning fewer results.
 func (s *Store) CountSessionSearchSourcesByState(ctx context.Context) (map[domain.SessionSearchSourceState]int64, error) {
 	rows, err := s.readDB.QueryContext(ctx,
-		`SELECT state, COUNT(*) FROM session_search_sources GROUP BY state`)
+		`SELECT state, COUNT(*) FROM session_search_sources
+WHERE session_id NOT IN (SELECT session_id FROM session_search_deleted) GROUP BY state`)
 	if err != nil {
 		return nil, fmt.Errorf("count session search sources: %w", err)
 	}

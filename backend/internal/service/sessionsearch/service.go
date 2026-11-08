@@ -49,8 +49,12 @@ const (
 	// maxIdentifierSplits bounds how many identifiers per document are expanded
 	// into their parts, so a huge command output cannot triple the index.
 	maxIdentifierSplits = 200
-	// batchSize is how many documents one transaction writes.
+	// batchSize is how many documents one transaction writes. The index has
+	// its own database file, so its transactions hold only that file's write
+	// lock: nothing else in the daemon waits for them.
 	batchSize = 256
+	// orphanSessionsPerSweep bounds how many deleted sessions one sweep cleans.
+	orphanSessionsPerSweep = 8
 	// pageSize is how many sessions one backfill page reads before yielding.
 	pageSize = 50
 	// nativeReadChunk bounds one read from a transcript.
@@ -69,8 +73,11 @@ type Store interface {
 	CountSessionSearchDocsMatching(ctx context.Context, params domain.SessionSearchParams) (int64, error)
 	CountSessionSearchSessionsBrowsing(ctx context.Context, params domain.SessionSearchParams) (int64, error)
 	UpsertSessionSearchDocs(ctx context.Context, docs []domain.SessionSearchDoc) error
-	PruneSessionSearchDocsBefore(ctx context.Context, sourceKey string, indexedAt time.Time) error
 	DeleteSessionSearchDocsForSource(ctx context.Context, sourceKey string) error
+	SessionSearchSourceDocs(ctx context.Context, sourceKey string) ([]domain.SessionSearchDocRef, error)
+	DeleteSessionSearchDocsByID(ctx context.Context, ids []int64) error
+	SessionSearchOrphanSessions(ctx context.Context, limit int) ([]string, error)
+	DeleteSessionSearchSession(ctx context.Context, sessionID string) error
 	CountSessionSearchDocsForSource(ctx context.Context, sourceKey string) (int64, error)
 	UpsertSessionSearchSource(ctx context.Context, source domain.SessionSearchSource) error
 	GetSessionSearchSource(ctx context.Context, sourceKey string) (domain.SessionSearchSource, bool, error)
@@ -675,8 +682,15 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 	}
 	fingerprint := chatFingerprint(conversation, messages, activities, paths)
 	if hadPrevious && previous.State == domain.SessionSearchSourceActive && previous.Fingerprint == fingerprint {
-		// Nothing the index can see changed. This is the incremental path: the
-		// reads above are bounded by one conversation, and no writes happen.
+		// Nothing the index can see changed (a status or revision moved). Record
+		// the new stamp, or every later sweep would re-read the conversation.
+		if current := stampValue(stamp); current != "" && current != previous.Stamp {
+			previous.Stamp = current
+			previous.UpdatedAt = s.now()
+			if err := s.store.UpsertSessionSearchSource(ctx, previous); err != nil {
+				return 0, err
+			}
+		}
 		return 0, nil
 	}
 	now := s.passTime(previous, hadPrevious)
@@ -756,10 +770,8 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 	// list. `paths` is still part of the fingerprint: a path that disappeared from
 	// the activity list must trigger a rewrite.
 	_ = paths
-	if err := s.writeDocs(ctx, docs); err != nil {
-		return 0, err
-	}
-	if err := s.store.PruneSessionSearchDocsBefore(ctx, sourceKey, now); err != nil {
+	written, err := s.writeChanged(ctx, sourceKey, docs, true)
+	if err != nil {
 		return 0, err
 	}
 	count, err := s.store.CountSessionSearchDocsForSource(ctx, sourceKey)
@@ -787,7 +799,7 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 	if err := s.store.UpsertSessionSearchSource(ctx, source); err != nil {
 		return 0, err
 	}
-	return len(docs), nil
+	return written, nil
 }
 
 // Per-section budgets for one activity document. No section is ever cut from
@@ -1169,6 +1181,66 @@ func (s *Service) writeDocs(ctx context.Context, docs []domain.SessionSearchDoc)
 	return nil
 }
 
+// writeChanged writes the documents of a source that are new or changed, and,
+// for a source rebuilt whole each pass, deletes the stored ones it no longer
+// produces. A long active session therefore writes its new message, not its
+// thousands of others.
+func (s *Service) writeChanged(ctx context.Context, sourceKey string, docs []domain.SessionSearchDoc, deleteMissing bool) (int, error) {
+	refs, err := s.store.SessionSearchSourceDocs(ctx, sourceKey)
+	if err != nil {
+		return 0, err
+	}
+	stored := make(map[string]domain.SessionSearchDocRef, len(refs))
+	for _, ref := range refs {
+		stored[ref.DocKey+"\x00"+string(ref.Kind)] = ref
+	}
+	changed := make([]domain.SessionSearchDoc, 0)
+	kept := make(map[int64]bool, len(docs))
+	for _, doc := range docs {
+		ref, ok := stored[doc.DocKey+"\x00"+string(doc.Kind)]
+		if ok {
+			kept[ref.ID] = true
+			if ref.Fingerprint == doc.Fingerprint() {
+				continue
+			}
+		}
+		changed = append(changed, doc)
+	}
+	if err := s.writeDocs(ctx, changed); err != nil {
+		return 0, err
+	}
+	if deleteMissing {
+		var removed []int64
+		for _, ref := range refs {
+			if !kept[ref.ID] {
+				removed = append(removed, ref.ID)
+			}
+		}
+		if err := s.store.DeleteSessionSearchDocsByID(ctx, removed); err != nil {
+			return len(changed), err
+		}
+	}
+	return len(changed), nil
+}
+
+// removeDeletedSessions removes the documents of sessions that were deleted.
+// The index lives in its own database file, which the session delete cannot
+// touch: the delete records the id, search ignores the session at once, and
+// this removes its documents.
+func (s *Service) removeDeletedSessions(ctx context.Context) {
+	orphans, err := s.store.SessionSearchOrphanSessions(ctx, orphanSessionsPerSweep)
+	if err != nil {
+		s.log.Warn("session search orphan scan failed", "error", err)
+		return
+	}
+	for _, sessionID := range orphans {
+		if err := s.store.DeleteSessionSearchSession(ctx, sessionID); err != nil {
+			s.log.Warn("session search orphan cleanup failed", "session", sessionID, "error", err)
+			return
+		}
+	}
+}
+
 // IndexAll backfills every session, in pages, yielding between them. It returns
 // how many documents were written. A failure on one source is recorded on that
 // source and does not stop the rest: an unreadable transcript must not hide the
@@ -1272,6 +1344,7 @@ func (s *Service) Sweep(ctx context.Context) (int, error) {
 	if s == nil || s.store == nil {
 		return 0, errors.New("session search: store is required")
 	}
+	s.removeDeletedSessions(ctx)
 	conversations, err := s.store.ListSessionSearchConversations(ctx)
 	if err != nil {
 		return 0, err

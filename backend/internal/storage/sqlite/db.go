@@ -146,16 +146,29 @@ func Open(dataDir string) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, err
 	}
-
-	readDB, err := sql.Open("sqlite", dsn)
+	store, err := withSearchIndex(dataDir, dsn, writeDB)
 	if err != nil {
 		_ = writeDB.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// withSearchIndex opens the session search database (search_db.go) and the
+// reader pool, which sees it attached, beside an open, migrated writer.
+func withSearchIndex(dataDir, dsn string, writeDB *sql.DB) (*Store, error) {
+	searchDB, err := openSearchWriter(dataDir, writeDB)
+	if err != nil {
+		return nil, err
+	}
+	readDB, err := openReaders(dataDir, dsn)
+	if err != nil {
+		_ = searchDB.Close()
 		return nil, fmt.Errorf("open sqlite reader: %w", err)
 	}
-	readDB.SetMaxOpenConns(maxReaders)
-	readDB.SetMaxIdleConns(maxReaders)
-
-	return sqlitestore.NewStore(writeDB, readDB), nil
+	store := sqlitestore.NewStore(writeDB, readDB)
+	store.SetSearchWriter(searchDB)
+	return store, nil
 }
 
 // OpenReadOnly opens an existing SQLite database under dataDir without creating
@@ -282,15 +295,12 @@ func OpenPreMigrated(dataDir string) (*Store, error) {
 		)
 	}
 
-	readDB, err := sql.Open("sqlite", dsn)
+	store, err := withSearchIndex(dataDir, dsn, writeDB)
 	if err != nil {
 		_ = writeDB.Close()
-		return nil, fmt.Errorf("open sqlite reader: %w", err)
+		return nil, err
 	}
-	readDB.SetMaxOpenConns(maxReaders)
-	readDB.SetMaxIdleConns(maxReaders)
-
-	return sqlitestore.NewStore(writeDB, readDB), nil
+	return store, nil
 }
 
 func migrate(db *sql.DB) error {

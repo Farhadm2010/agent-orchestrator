@@ -28,6 +28,25 @@ type Store struct {
 	qr                    *gen.Queries // bound to the reader pool
 	writeMu               *contextMutex
 	usageTelemetryAllowed func() bool
+	// searchDB is the session search index's own database file and its single
+	// writer (storage/sqlite/search_db.go). Readers see it attached.
+	searchDB *sql.DB
+}
+
+// SetSearchWriter installs the session search database's writer. The store
+// owns it from here on and closes it.
+func (s *Store) SetSearchWriter(db *sql.DB) {
+	s.searchDB = db
+}
+
+// searchWriter is where index writes go: the search database when one is
+// installed, otherwise (a store opened over a bare connection in a test) the
+// main writer.
+func (s *Store) searchWriter() *sql.DB {
+	if s.searchDB != nil {
+		return s.searchDB
+	}
+	return s.writeDB
 }
 
 // SetUsageTelemetryAllowed installs the live consent check before session
@@ -142,11 +161,16 @@ func NewStore(writeDB, readDB *sql.DB) *Store {
 	}
 }
 
-// Close closes both pools.
+// Close closes every pool.
 func (s *Store) Close() error {
 	err := s.writeDB.Close()
 	if e := s.readDB.Close(); e != nil && err == nil {
 		err = e
+	}
+	if s.searchDB != nil {
+		if e := s.searchDB.Close(); e != nil && err == nil {
+			err = e
+		}
 	}
 	return err
 }
