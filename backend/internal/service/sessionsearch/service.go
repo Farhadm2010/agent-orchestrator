@@ -790,14 +790,15 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 	return len(docs), nil
 }
 
-// Per-section budgets for one activity document. They sum to the document
-// budget, so the assembled body never has to be truncated from the front —
-// which would discard exactly the end of a failing command's output that the
-// document exists to keep.
+// Per-section budgets for one activity document. No section is ever cut from
+// the front to fit the others, which would discard exactly the end of a
+// failing command's output that the document exists to keep. Output has the
+// largest share: a quarter goes to its start (what ran) and the rest, 4.5 KiB,
+// to its end, so keeping the start cost none of the end it kept before.
 const (
 	activitySummaryBytes = 1 << 10
 	activityDetailBytes  = 2 << 10
-	activityOutputBytes  = 4 << 10
+	activityOutputBytes  = 6 << 10
 	// outputHeadDivisor sets how much of an output budget goes to its start:
 	// a quarter. The rest keeps its end, where a failure usually is.
 	outputHeadDivisor     = 4

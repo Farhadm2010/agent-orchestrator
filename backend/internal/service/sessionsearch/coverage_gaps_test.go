@@ -75,11 +75,14 @@ func TestChatLongMessageAndLongOutputKeepBothEnds(t *testing.T) {
 	appendUserMessage(t, f.store, session, "conv-chat-long", "msg-long", "turn-long",
 		"please look "+filler(18<<10)+" zzChatPromptEndNeedle")
 	addCommandActivity(t, f.store, "conv-chat-long", "turn-long", "act-long", "go test ./...",
-		"zzChatOutputHeadNeedle "+filler(12<<10)+" FAIL zzChatOutputTailNeedle", domain.ActivityStatusFailed)
+		// The deep-tail word sits 3.8 KiB from the end: the old 4 KiB tail kept
+		// it, so keeping the start must not shorten the tail (found by the E2E
+		// run on real sessions, a word in a 10 KB build log).
+		"zzChatOutputHeadNeedle "+filler(12<<10)+" zzChatDeepTailNeedle "+filler(3800)+" FAIL zzChatOutputTailNeedle", domain.ActivityStatusFailed)
 	if _, err := f.svc.IndexAll(context.Background()); err != nil {
 		t.Fatalf("IndexAll: %v", err)
 	}
-	for _, needle := range []string{"zzChatPromptEndNeedle", "zzChatOutputHeadNeedle", "zzChatOutputTailNeedle"} {
+	for _, needle := range []string{"zzChatPromptEndNeedle", "zzChatOutputHeadNeedle", "zzChatDeepTailNeedle", "zzChatOutputTailNeedle"} {
 		got := search(t, f.svc, needle).Results
 		if len(got) != 1 {
 			t.Fatalf("%s: results = %s", needle, describe(got))
