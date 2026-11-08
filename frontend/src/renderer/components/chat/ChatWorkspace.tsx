@@ -48,6 +48,7 @@ import { useTranslation } from "react-i18next";
 import { ChatSelectionActions } from "./ChatSelectionActions";
 import { selectionRangesEqual } from "../../lib/selection-toolbar";
 import { useScrollFollow } from "../../hooks/useScrollFollow";
+import { useSessionMovedTo } from "../../hooks/useSessionMovedTo";
 import {
 	defaultRangeExtractor,
 	measureElement,
@@ -882,6 +883,8 @@ function ChatWorkspaceContent({
 	const suppressStopped = wakingFromHibernate.current && snapshot.controller.state === "stopped";
 	// A terminated session has no agent to resume: only a restore brings it back.
 	const terminated = Boolean(session && !sessionIsActive(session));
+	// A session that moved to another computer cannot be restored here.
+	const movedTo = useSessionMovedTo(terminated ? session : undefined);
 	// After a restart the daemon is still verifying this session and reconnects
 	// its surviving agent itself. Until it settles, "stopped" is not a state to act on.
 	const startupReconnecting = snapshot.controller.state === "stopped" && !resumingAgent && !terminated &&
@@ -1917,6 +1920,7 @@ function ChatWorkspaceContent({
 							automaticWakePending={suppressStopped}
 							reconnecting={startupReconnecting}
 							terminated={terminated}
+							movedTo={movedTo}
 							onResume={newWorkDisabled ? undefined : onResumeAgent}
 							resuming={resumingAgent}
 							resumeError={resumeError}
@@ -2110,6 +2114,8 @@ function ChatWorkspaceContent({
 												? setupPlaceholder
 												: controllerTransitioning || newWorkDisabled
 												? ""
+												: terminated && movedTo
+												? t("moveSession.movedHeading", { host: movedTo.label })
 												: terminated && snapshot.controller.state === "stopped"
 												? t(resumingAgent ? "shell.restoringSession" : "chat.archived.placeholder")
 												: agentResuming
@@ -2539,6 +2545,7 @@ function ControllerBanner({
 	automaticWakePending,
 	reconnecting,
 	terminated = false,
+	movedTo,
 	onResume,
 	resuming,
 	resumeError,
@@ -2557,6 +2564,8 @@ function ControllerBanner({
 	reconnecting?: boolean;
 	/** The session is archived, so `onResume` restores it instead of resuming its agent. */
 	terminated?: boolean;
+	/** Where an archived session continues; it offers Open session instead of Restore. */
+	movedTo?: { label: string; sessionId: string; open?: () => void };
 	onResume?: () => void | Promise<unknown>;
 	resuming?: boolean;
 	resumeError?: string;
@@ -2592,7 +2601,9 @@ function ControllerBanner({
 			tone: "text-warning",
 		},
 		stopped: {
-			title: terminated
+			title: terminated && movedTo
+				? t("moveSession.movedHeading", { host: movedTo.label })
+				: terminated
 				? t(waking ? "shell.restoringSession" : "terminal.sessionTerminated")
 				: waking
 					? "Waking agent…"
@@ -2635,7 +2646,9 @@ function ControllerBanner({
 				{actionable ? (
 					<>
 						<span className="text-xs leading-snug text-muted-foreground">
-							{terminated ? t("chat.archived.body") : "History is kept. Resume the agent or open a shell in the same worktree."}
+							{terminated && movedTo
+								? t("moveSession.movedMessage", { sessionId: movedTo.sessionId })
+								: terminated ? t("chat.archived.body") : "History is kept. Resume the agent or open a shell in the same worktree."}
 						</span>
 						{resumeError || shellError ? (
 							<span className="text-xs leading-snug text-destructive">
@@ -2643,7 +2656,12 @@ function ControllerBanner({
 							</span>
 						) : null}
 						<div className="mt-1.5 flex flex-wrap gap-2">
-							{onResume ? (
+							{movedTo?.open ? (
+								<Button type="button" size="sm" variant="outline" onClick={movedTo.open}>
+									{t("moveSession.open")}
+								</Button>
+							) : null}
+							{onResume && !movedTo ? (
 								<Button
 									type="button"
 									size="sm"
