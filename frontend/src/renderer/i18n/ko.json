@@ -4365,6 +4365,7 @@
 	"search.showMore": "{{remaining}}개 더 보기",
 	"search.pageFailed": "세션을 더 불러오지 못했습니다.",
 	"search.retry": "다시 시도",
+	"search.corrected": "{{words}}에 대한 결과입니다. {{typed}}와 일치하는 항목이 없습니다.",
 	"command.sessionMatches_one": "{{count}}개 일치",
 	"command.sessionMatches_other": "{{count}}개 일치",
 	"search.matchCount_one": "{{count}}개 일치",

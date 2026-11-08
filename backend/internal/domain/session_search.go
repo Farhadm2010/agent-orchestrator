@@ -361,12 +361,45 @@ type SessionSearchRanking struct {
 	// hundred times outranked the one session that said "rebasing", the word
 	// searched for. Benchmark-only.
 	ExactTierOff bool
+	// Typos overrides how misspelled words are repaired (the zero value is the
+	// shipped rule). Benchmark-only.
+	Typos SessionSearchTypoRule
+}
+
+// SessionSearchTypoRule says when a query word is replaced by a close word
+// from the index vocabulary.
+type SessionSearchTypoRule string
+
+const (
+	// SessionSearchTyposDefault is the shipped rule.
+	SessionSearchTyposDefault SessionSearchTypoRule = ""
+	// SessionSearchTyposOff never repairs a word.
+	SessionSearchTyposOff SessionSearchTypoRule = "off"
+	// SessionSearchTyposZeroHit repairs a word only when nothing matches it
+	// (Orca's rule).
+	SessionSearchTyposZeroHit SessionSearchTypoRule = "zero-hit"
+	// SessionSearchTyposFrequencyGap also repairs a word that matches a few
+	// documents when a close word matches far more.
+	SessionSearchTyposFrequencyGap SessionSearchTypoRule = "frequency-gap"
+)
+
+// SessionSearchVocabTerm is one term of the index vocabulary and how many
+// documents hold it.
+type SessionSearchVocabTerm struct {
+	Term string
+	Docs int64
+}
+
+// SessionSearchCorrection is one word of a query that was searched as another.
+type SessionSearchCorrection struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // IsZero reports the shipped ranking (no override set).
 func (r SessionSearchRanking) IsZero() bool {
 	return r.KindWeights == nil && !r.KindTierFirst && !r.AllTermsTier && r.SessionTailWeight == 0 &&
-		!r.CombMax && r.SessionTailDepth == 0 && !r.NameTierOff && !r.ExactTierOff
+		!r.CombMax && r.SessionTailDepth == 0 && !r.NameTierOff && !r.ExactTierOff && r.Typos == ""
 }
 
 // TailDepth returns how many of a session's other matches its score counts;
@@ -536,6 +569,9 @@ type SessionSearchResponse struct {
 	Sort     SessionSearchSort     `json:"sort"`
 	Group    SessionSearchGroup    `json:"group"`
 	Coverage SessionSearchCoverage `json:"coverage"`
+	// Corrections lists the words searched as a close word from the index
+	// because nothing matched them as typed ("migartions" -> "migrations").
+	Corrections []SessionSearchCorrection `json:"corrections,omitempty"`
 }
 
 // SessionSearchMaxLimit bounds one page. It is small on purpose: the index can
@@ -614,6 +650,65 @@ type SessionSearchParsedQuery struct {
 	// API rejects the query rather than ignoring the filter, because silently
 	// dropping a filter returns results the person did not ask for.
 	InvalidOperators []string
+	// Words are the plain words of the query, as typed: the ones a typo repair
+	// may replace. Phrases, exact and anchored terms are left as written.
+	Words []string
+
+	phrases, prefixes, exacts []string
+	options                   SessionSearchMatchOptions
+}
+
+// WithWords returns the query with its plain words replaced and its match
+// expressions rebuilt exactly as the parser builds them, so a corrected query
+// keeps every operator, phrase and tier of the original.
+func (p SessionSearchParsedQuery) WithWords(words []string) SessionSearchParsedQuery {
+	out := p
+	out.Words = append([]string(nil), words...)
+	out.Terms = append(append(append(append([]string{}, p.phrases...), words...), p.exacts...), p.prefixes...)
+	out.MatchQuery, out.AllTermsQuery, out.ExactQuery, out.HighlightTerms = buildMatchExpressions(p.phrases, p.prefixes, p.exacts, words, p.HasOr, p.options)
+	return out
+}
+
+// SessionSearchWordRoot is the folded form a plain word is matched by: its stem
+// root when it has one (matched as a prefix), else the word.
+func SessionSearchWordRoot(word string) string {
+	folded := FoldSessionSearchText(word)
+	if root, ok := stemRoot(folded); ok {
+		return root
+	}
+	return folded
+}
+
+// SessionSearchSimilarity scores two words from 0 to 1: one minus their edit
+// distance over the longer length, where a swap of two adjacent letters is one
+// edit (optimal string alignment). "migartions" and "migrations" score 0.9.
+func SessionSearchSimilarity(a, b string) float64 {
+	x, y := []rune(a), []rune(b)
+	if len(x) == 0 && len(y) == 0 {
+		return 1
+	}
+	rows := make([][]int, len(x)+1)
+	for i := range rows {
+		rows[i] = make([]int, len(y)+1)
+		rows[i][0] = i
+	}
+	for j := range rows[0] {
+		rows[0][j] = j
+	}
+	for i := 1; i <= len(x); i++ {
+		for j := 1; j <= len(y); j++ {
+			cost := 1
+			if x[i-1] == y[j-1] {
+				cost = 0
+			}
+			best := min(rows[i-1][j]+1, rows[i][j-1]+1, rows[i-1][j-1]+cost)
+			if i > 1 && j > 1 && x[i-1] == y[j-2] && x[i-2] == y[j-1] {
+				best = min(best, rows[i-2][j-2]+1)
+			}
+			rows[i][j] = best
+		}
+	}
+	return 1 - float64(rows[len(x)][len(y)])/float64(max(len(x), len(y)))
 }
 
 // SessionSearchOperatorPrefixes are the filters a query may carry. They are
@@ -766,6 +861,7 @@ func ParseSessionSearchQueryWith(raw string, options SessionSearchMatchOptions) 
 
 	parsed.Text = strings.TrimSpace(strings.Join(textParts, " "))
 	parsed.Terms = append(append(append(append([]string{}, phrases...), words...), exacts...), prefixes...)
+	parsed.Words, parsed.phrases, parsed.prefixes, parsed.exacts, parsed.options = words, phrases, prefixes, exacts, options
 	parsed.MatchQuery, parsed.AllTermsQuery, parsed.ExactQuery, parsed.HighlightTerms = buildMatchExpressions(phrases, prefixes, exacts, words, parsed.HasOr, options)
 	parsed.ExcludeQuery = buildExcludeExpression(excluded)
 	return parsed

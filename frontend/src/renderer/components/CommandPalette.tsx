@@ -1106,6 +1106,14 @@ export function CommandPalette() {
 									))}
 								</CommandGroup>
 							))}
+							{sessionSearchEnabled && sessionSearchSettled && (sessionSearchQuery.data?.corrections?.length ?? 0) > 0 && (
+								<div role="status" className="px-[var(--size-command-pad-x)] py-2 text-caption text-muted-foreground" data-testid="palette-session-corrections">
+									{t("search.corrected", {
+										words: (sessionSearchQuery.data?.corrections ?? []).map((correction) => `“${correction.to}”`).join(", "),
+										typed: (sessionSearchQuery.data?.corrections ?? []).map((correction) => `“${correction.from}”`).join(", "),
+									})}
+								</div>
+							)}
 							{sessionSearchEnabled && sessionSearchSettled && sessionSearchQuery.isFetching && sessionSearchItems.length > 0 && (
 								<div role="status" className="px-[var(--size-command-pad-x)] py-2 text-caption text-muted-foreground">{t("command.searchingSessions")}</div>
 							)}

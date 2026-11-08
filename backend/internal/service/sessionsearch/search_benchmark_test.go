@@ -98,6 +98,8 @@ var benchVariants = []benchVariant{
 	// The ranking before the exact tier: a widened match (the stem's prefix, or
 	// a longer word) scored like the word as typed.
 	{name: "exact-tier-off", ranking: domain.SessionSearchRanking{ExactTierOff: true}},
+	{name: "typos-off", ranking: domain.SessionSearchRanking{Typos: domain.SessionSearchTyposOff}},
+	{name: "typos-frequency-gap", ranking: domain.SessionSearchRanking{Typos: domain.SessionSearchTyposFrequencyGap}},
 }
 
 // selectedVariants is "shipped" unless AO_SEARCH_BENCH_VARIANTS names others

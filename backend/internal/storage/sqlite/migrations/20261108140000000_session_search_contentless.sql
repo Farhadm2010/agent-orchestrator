@@ -72,6 +72,12 @@ CREATE VIRTUAL TABLE session_search_fts USING fts5(
 -- +goose StatementEnd
 
 -- +goose StatementBegin
+-- The index vocabulary, one row per term with the number of documents holding
+-- it. Typo repair looks up close words here when a typed word matches nothing.
+CREATE VIRTUAL TABLE session_search_vocab USING fts5vocab(session_search_fts, 'row');
+-- +goose StatementEnd
+
+-- +goose StatementBegin
 -- Deleting a document removes its index row and its text, so a pruned or
 -- cleared source can never leave a searchable orphan. ao_search_body() is
 -- registered by the daemon (storage/sqlite/search_functions.go) and decodes
@@ -87,6 +93,9 @@ END;
 -- +goose Down
 -- +goose StatementBegin
 DROP TRIGGER IF EXISTS session_search_docs_ad;
+-- +goose StatementEnd
+-- +goose StatementBegin
+DROP TABLE IF EXISTS session_search_vocab;
 -- +goose StatementEnd
 -- +goose StatementBegin
 DROP TABLE IF EXISTS session_search_fts;

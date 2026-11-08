@@ -37,6 +37,10 @@ func (s *stubSessionSearch) Search(_ context.Context, parsed domain.SessionSearc
 	return s.response, s.err
 }
 
+func (s *stubSessionSearch) CorrectQuery(_ context.Context, parsed domain.SessionSearchParsedQuery) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error) {
+	return parsed, nil, nil
+}
+
 func (s *stubSessionSearch) MatchesForSession(_ context.Context, sessionID, matchQuery string, _ []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchResult, error) {
 	s.matchArgs = [2]string{sessionID, matchQuery}
 	return s.matches, s.err

@@ -19,6 +19,7 @@ import (
 type SessionSearchService interface {
 	Search(ctx context.Context, parsed domain.SessionSearchParsedQuery, params domain.SessionSearchParams) (domain.SessionSearchResponse, error)
 	MatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchResult, error)
+	CorrectQuery(ctx context.Context, parsed domain.SessionSearchParsedQuery) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error)
 	Coverage(ctx context.Context) (domain.SessionSearchCoverage, error)
 }
 
@@ -65,6 +66,13 @@ func (c *SessionSearchController) matches(w http.ResponseWriter, r *http.Request
 	}
 	sessionID := chi.URLParam(r, "sessionId")
 	parsed := domain.ParseSessionSearchQuery(r.URL.Query().Get("q"))
+	// The find bar steps through what the search found, so a misspelled word is
+	// corrected here the same way.
+	parsed, _, err := c.Svc.CorrectQuery(r.Context(), parsed)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
 	matchQuery, terms := parsed.MatchQuery, parsed.HighlightTerms
 	if matchQuery == "" && parsed.PRRef != nil {
 		// A result opened from a pasted PR URL steps through where the PR is
@@ -131,6 +139,15 @@ type SessionSearchResponse struct {
 	Sort     string                `json:"sort" enum:"relevance,recent"`
 	Group    string                `json:"group" enum:"session,message"`
 	Coverage SessionSearchCoverage `json:"coverage"`
+	// Corrections are the words searched as a close word from the index
+	// because nothing matched them as typed.
+	Corrections []SessionSearchCorrection `json:"corrections,omitempty"`
+}
+
+// SessionSearchCorrection is one misspelled word and the word it was searched as.
+type SessionSearchCorrection struct {
+	From string `json:"from" description:"The word as typed."`
+	To   string `json:"to" description:"The indexed word it was searched as."`
 }
 
 // SessionSearchMatchesQuery is the query for the in-session match list.
@@ -289,15 +306,27 @@ func atoiOrZero(raw string) int {
 
 func sessionSearchResponse(result domain.SessionSearchResponse) SessionSearchResponse {
 	return SessionSearchResponse{
-		Query:    result.Query,
-		Results:  sessionSearchResults(result.Results),
-		Total:    result.Total,
-		Limit:    result.Limit,
-		Offset:   result.Offset,
-		Sort:     string(result.Sort),
-		Group:    string(result.Group),
-		Coverage: sessionSearchCoverage(result.Coverage),
+		Query:       result.Query,
+		Results:     sessionSearchResults(result.Results),
+		Total:       result.Total,
+		Limit:       result.Limit,
+		Offset:      result.Offset,
+		Sort:        string(result.Sort),
+		Group:       string(result.Group),
+		Coverage:    sessionSearchCoverage(result.Coverage),
+		Corrections: sessionSearchCorrections(result.Corrections),
 	}
+}
+
+func sessionSearchCorrections(corrections []domain.SessionSearchCorrection) []SessionSearchCorrection {
+	if len(corrections) == 0 {
+		return nil
+	}
+	out := make([]SessionSearchCorrection, len(corrections))
+	for index, correction := range corrections {
+		out[index] = SessionSearchCorrection{From: correction.From, To: correction.To}
+	}
+	return out
 }
 
 func sessionSearchResults(results []domain.SessionSearchResult) []SessionSearchResult {

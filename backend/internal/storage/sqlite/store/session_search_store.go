@@ -819,6 +819,49 @@ FROM json_each(?)`, string(encodedIndex)); err != nil {
 	})
 }
 
+// SessionSearchVocabDocs reports how many documents hold a term starting with
+// prefix, summed over those terms (a document holding two such terms counts
+// twice; typo repair only needs "none" and "a few").
+func (s *Store) SessionSearchVocabDocs(ctx context.Context, prefix string) (int64, error) {
+	if prefix == "" {
+		return 0, nil
+	}
+	var docs int64
+	if err := s.readDB.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(doc), 0) FROM session_search_vocab WHERE term >= ? AND term < ?`,
+		prefix, prefix+"\U0010FFFF",
+	).Scan(&docs); err != nil {
+		return 0, fmt.Errorf("read session search vocabulary: %w", err)
+	}
+	return docs, nil
+}
+
+// SessionSearchVocabCandidates lists the vocabulary terms that start with
+// first, are minRunes to maxRunes long and appear in at least minDocs
+// documents: the close words a misspelled word may have meant.
+func (s *Store) SessionSearchVocabCandidates(ctx context.Context, first string, minRunes, maxRunes int, minDocs int64) ([]domain.SessionSearchVocabTerm, error) {
+	if first == "" {
+		return nil, nil
+	}
+	rows, err := s.readDB.QueryContext(ctx, `
+SELECT term, doc FROM session_search_vocab
+WHERE term >= ? AND term < ? AND doc >= ? AND length(term) BETWEEN ? AND ?`,
+		first, first+"\U0010FFFF", minDocs, minRunes, maxRunes)
+	if err != nil {
+		return nil, fmt.Errorf("list session search vocabulary: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var terms []domain.SessionSearchVocabTerm
+	for rows.Next() {
+		var term domain.SessionSearchVocabTerm
+		if err := rows.Scan(&term.Term, &term.Docs); err != nil {
+			return nil, fmt.Errorf("scan session search vocabulary: %w", err)
+		}
+		terms = append(terms, term)
+	}
+	return terms, rows.Err()
+}
+
 // sessionSearchStoredHashes returns the stored text hash of each document that
 // has text, keyed by document id.
 func sessionSearchStoredHashes(ctx context.Context, executor gen.DBTX, ids []int64) (map[int64]int64, error) {

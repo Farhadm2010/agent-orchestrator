@@ -171,6 +171,20 @@ describe("SessionSearchView", () => {
 		expect(screen.getByText(/aider/)).toBeInTheDocument();
 	});
 
+	// A misspelled word is searched as the closest indexed word; the page says
+	// so, or the results would read as matches for what was typed.
+	it("says which misspelled word was searched as another", async () => {
+		getMock.mockResolvedValue(response({ corrections: [{ from: "migartions", to: "migrations" }] }));
+		const user = userEvent.setup();
+		render(<SessionSearchView />, { wrapper });
+
+		await user.type(screen.getByRole("searchbox", { name: "Search past sessions" }), "migartions");
+		await waitFor(() => expect(screen.getByTestId("session-search-corrections")).toBeInTheDocument());
+		expect(screen.getByTestId("session-search-corrections")).toHaveTextContent(
+			"Showing results for “migrations”. Nothing matched “migartions”.",
+		);
+	});
+
 	it("sends the project, agent and date filters to the daemon", async () => {
 		getMock.mockResolvedValue(response());
 		const user = userEvent.setup();

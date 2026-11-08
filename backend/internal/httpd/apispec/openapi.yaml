@@ -21655,6 +21655,18 @@ components:
       required:
       - session
       type: object
+    SessionSearchCorrection:
+      properties:
+        from:
+          description: The word as typed.
+          type: string
+        to:
+          description: The indexed word it was searched as.
+          type: string
+      required:
+      - from
+      - to
+      type: object
     SessionSearchCoverage:
       properties:
         backfilledAt:
@@ -21721,6 +21733,10 @@ components:
       type: object
     SessionSearchResponse:
       properties:
+        corrections:
+          items:
+            $ref: '#/components/schemas/SessionSearchCorrection'
+          type: array
         coverage:
           $ref: '#/components/schemas/SessionSearchCoverage'
         group:

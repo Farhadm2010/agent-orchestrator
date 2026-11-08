@@ -1620,6 +1620,25 @@ describe("CommandPalette session-text search", () => {
 		expect(searchCall?.[1]).toMatchObject({ params: { query: { sort: "recent", limit: 8 } } });
 	});
 
+	it("says which misspelled word was searched as another", async () => {
+		getMock.mockImplementation(async (path: string) => {
+			if (path.includes("/search/index-status")) return { data: { coverage: { state: "ready" } } };
+			if (path.includes("/search/sessions")) {
+				const page = searchResponse([], undefined) as { data: Record<string, unknown> };
+				return { data: { ...page.data, corrections: [{ from: "migartions", to: "migrations" }] } };
+			}
+			if (path === "/api/v1/conversations/search") return { data: { results: [] } };
+			return { data: {} };
+		});
+		renderPalette();
+		act(() => useUiStore.getState().setCommandPaletteOpen(true));
+		const input = await screen.findByPlaceholderText(/search sessions/i);
+		fireEvent.change(input, { target: { value: "migartions" } });
+
+		const note = await screen.findByTestId("palette-session-corrections", {}, { timeout: 2_000 });
+		expect(note).toHaveTextContent("Showing results for “migrations”. Nothing matched “migartions”.");
+	});
+
 	it("explains an incomplete index instead of implying nothing exists", async () => {
 		mockSearch([], { state: "backfilling", pendingSources: 3, unindexedHarnesses: ["aider"] });
 		renderPalette();

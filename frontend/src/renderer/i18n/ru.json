@@ -4580,6 +4580,7 @@
 	"search.showMore": "Показать ещё {{remaining}}",
 	"search.pageFailed": "Не удалось загрузить больше сессий.",
 	"search.retry": "Повторить",
+	"search.corrected": "Результаты для {{words}}. По запросу {{typed}} ничего не найдено.",
 	"command.sessionMatches_one": "{{count}} совпадение",
 	"command.sessionMatches_few": "{{count}} совпадения",
 	"command.sessionMatches_many": "{{count}} совпадений",

@@ -63,6 +63,8 @@ type Store interface {
 	SearchSessionSearchDocs(ctx context.Context, params domain.SessionSearchParams) ([]domain.SessionSearchHit, error)
 	BrowseSessionSearchDocs(ctx context.Context, params domain.SessionSearchParams) ([]domain.SessionSearchHit, error)
 	SessionSearchMatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchHit, error)
+	SessionSearchVocabDocs(ctx context.Context, prefix string) (int64, error)
+	SessionSearchVocabCandidates(ctx context.Context, first string, minRunes, maxRunes int, minDocs int64) ([]domain.SessionSearchVocabTerm, error)
 	SessionSearchMatchCounts(ctx context.Context, matchQuery string, sessionIDs []string) (map[string]int, error)
 	CountSessionSearchDocsMatching(ctx context.Context, params domain.SessionSearchParams) (int64, error)
 	CountSessionSearchSessionsBrowsing(ctx context.Context, params domain.SessionSearchParams) (int64, error)
@@ -187,6 +189,15 @@ func (s *Service) Search(ctx context.Context, parsed domain.SessionSearchParsedQ
 	if err := parsed.Validate(); err != nil {
 		return domain.SessionSearchResponse{}, apierr.Invalid("SESSION_SEARCH_INVALID_RANGE", err.Error(), nil)
 	}
+	typoRule := s.ranking.Typos
+	if params.Ranking.Typos != domain.SessionSearchTyposDefault {
+		// A benchmark's ranking override also chooses the typo rule.
+		typoRule = params.Ranking.Typos
+	}
+	parsed, corrections, err := s.correctQuery(ctx, parsed, typoRule)
+	if err != nil {
+		return domain.SessionSearchResponse{}, err
+	}
 	params.ProjectID = firstNonEmpty(parsed.Project, params.ProjectID)
 	params.Harness = firstNonEmpty(parsed.Harness, params.Harness)
 	params.Machine = firstNonEmpty(parsed.Machine, params.Machine)
@@ -244,7 +255,6 @@ func (s *Service) Search(ctx context.Context, parsed domain.SessionSearchParsedQ
 	params.ExcludeQuery = parsed.ExcludeQuery
 	match := firstNonEmpty(parsed.MatchQuery, params.MatchQuery)
 	var hits []domain.SessionSearchHit
-	var err error
 	switch {
 	case match != "":
 		params.MatchQuery = match
@@ -314,14 +324,15 @@ func (s *Service) Search(ctx context.Context, parsed domain.SessionSearchParsedQ
 		total++
 	}
 	return domain.SessionSearchResponse{
-		Query:    parsed.Text,
-		Results:  results,
-		Total:    int(total),
-		Limit:    params.Limit,
-		Offset:   params.Offset,
-		Sort:     params.Sort,
-		Group:    params.Group,
-		Coverage: s.coverageOrEmpty(ctx),
+		Query:       parsed.Text,
+		Results:     results,
+		Total:       int(total),
+		Limit:       params.Limit,
+		Offset:      params.Offset,
+		Sort:        params.Sort,
+		Group:       params.Group,
+		Coverage:    s.coverageOrEmpty(ctx),
+		Corrections: corrections,
 	}, nil
 }
 

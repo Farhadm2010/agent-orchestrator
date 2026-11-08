@@ -4347,6 +4347,7 @@
 	"search.showMore": "再显示 {{remaining}} 个",
 	"search.pageFailed": "无法加载更多会话。",
 	"search.retry": "重试",
+	"search.corrected": "显示 {{words}} 的结果。没有与 {{typed}} 匹配的内容。",
 	"command.sessionMatches_one": "{{count}} 个匹配",
 	"command.sessionMatches_other": "{{count}} 个匹配",
 	"search.matchCount_one": "{{count}} 个匹配",

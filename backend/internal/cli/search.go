@@ -54,6 +54,13 @@ type sessionSearchResponseDTO struct {
 	Offset   int                      `json:"offset"`
 	Sort     string                   `json:"sort"`
 	Coverage sessionSearchCoverageDTO `json:"coverage"`
+	// Corrections are misspelled words searched as a close indexed word.
+	Corrections []sessionSearchCorrectionDTO `json:"corrections,omitempty"`
+}
+
+type sessionSearchCorrectionDTO struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 type sessionSearchIndexStatusDTO struct {
@@ -206,6 +213,11 @@ func normalizeSearchDate(raw string) (string, error) {
 // line and the session id is kept as the handle a caller can open.
 func writeSessionSearchTable(cmd *cobra.Command, response sessionSearchResponseDTO) error {
 	out := cmd.OutOrStdout()
+	if note := correctionNote(response.Corrections); note != "" {
+		if _, err := fmt.Fprintln(out, note); err != nil {
+			return err
+		}
+	}
 	if len(response.Results) == 0 {
 		// An empty page is still an answer: say so, and say what the index could
 		// not see, so "no results" is not read as "this never happened".
@@ -272,6 +284,19 @@ func writeIndexStatus(cmd *cobra.Command, response sessionSearchIndexStatusDTO) 
 		_, _ = fmt.Fprintf(out, "NOT INDEXED\t%s\n", strings.Join(coverage.UnindexedHarnesses, ", "))
 	}
 	return nil
+}
+
+// correctionNote says which misspelled words were searched as another word, so
+// a reader (or an agent) knows the results are for the corrected query.
+func correctionNote(corrections []sessionSearchCorrectionDTO) string {
+	if len(corrections) == 0 {
+		return ""
+	}
+	parts := make([]string, len(corrections))
+	for index, correction := range corrections {
+		parts[index] = fmt.Sprintf("%q as %q", correction.From, correction.To)
+	}
+	return "Searched " + strings.Join(parts, ", ") + ": nothing matched as typed."
 }
 
 // coverageNote says what the index cannot see, so an empty result is not read as

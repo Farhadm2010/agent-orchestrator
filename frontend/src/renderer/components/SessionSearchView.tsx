@@ -85,6 +85,7 @@ export function SessionSearchView() {
 	const search = useSessionSearchPages(filters, pages);
 	const results = search.data?.results ?? [];
 	const coverage = search.data?.coverage;
+	const corrections = search.data?.corrections ?? [];
 	const total = search.data?.total ?? results.length;
 	// A failed page stops paging: the next page would show results past a gap.
 	const hasMore = results.length < total && !search.exhausted && !search.pageError;
@@ -246,11 +247,13 @@ export function SessionSearchView() {
 								<p role="alert" className="px-3 py-8 text-center text-sm text-destructive">{search.error.message}</p>
 							) : results.length === 0 ? (
 								<div className="flex flex-col items-center gap-1 py-16 text-center">
+									<CorrectionNote corrections={corrections} />
 									<p className="text-control font-medium text-foreground">{t("search.noMatches")}</p>
 									<CoverageNote coverage={coverage} />
 								</div>
 							) : (
 								<>
+									<CorrectionNote corrections={corrections} className="px-3 pb-1 text-left" />
 									{/* How many matched, not just how many are on screen. */}
 									<p className="px-3 pb-2 text-xs text-muted-foreground" data-testid="session-search-count">
 										{t("search.resultCount", { shown: results.length, total })}
@@ -344,6 +347,20 @@ function SearchResultRow({ result, onOpen }: { result: SessionSearchResult; onOp
 				) : null}
 			</button>
 		</li>
+	);
+}
+
+/**
+ * Says which misspelled words were searched as a close word from the index, so
+ * the results are not read as matches for the word as typed.
+ */
+function CorrectionNote({ corrections, className }: { corrections: ReadonlyArray<{ from: string; to: string }>; className?: string }) {
+	const { t } = useTranslation();
+	if (corrections.length === 0) return null;
+	return (
+		<p role="status" className={cn("text-xs text-muted-foreground", className)} data-testid="session-search-corrections">
+			{t("search.corrected", { words: corrections.map((correction) => `“${correction.to}”`).join(", "), typed: corrections.map((correction) => `“${correction.from}”`).join(", ") })}
+		</p>
 	);
 }
 

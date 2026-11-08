@@ -7591,6 +7591,12 @@ export interface components {
         SessionResponse: {
             session: components["schemas"]["ControllersSessionView"];
         };
+        SessionSearchCorrection: {
+            /** @description The word as typed. */
+            from: string;
+            /** @description The indexed word it was searched as. */
+            to: string;
+        };
         SessionSearchCoverage: {
             /** Format: date-time */
             backfilledAt?: string;
@@ -7619,6 +7625,7 @@ export interface components {
             matches: components["schemas"]["SessionSearchResult"][];
         };
         SessionSearchResponse: {
+            corrections?: components["schemas"]["SessionSearchCorrection"][];
             coverage: components["schemas"]["SessionSearchCoverage"];
             /** @enum {string} */
             group: "session" | "message";

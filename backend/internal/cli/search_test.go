@@ -363,3 +363,31 @@ func TestSearchGroupsBySessionUnlessPerMessage(t *testing.T) {
 		t.Fatalf("group = %q then %q, want the default then message", first["group"], second["group"])
 	}
 }
+
+// A corrected word is said, so a person or an agent reading the table knows
+// the results are for the corrected query.
+func TestSearchSaysWhichWordWasCorrected(t *testing.T) {
+	cfg := setConfigEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/internal/telemetry/cli-invoked":
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/search/sessions":
+			_, _ = io.WriteString(w, `{"query":"migartions","results":[],"total":0,"limit":20,"offset":0,"sort":"relevance","coverage":{"state":"ready"},"corrections":[{"from":"migartions","to":"migrations"}]}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	writeRunFileFor(t, cfg, server)
+
+	out, stderr, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "search", "migartions")
+	if err != nil {
+		t.Fatalf("search: %v stderr=%s", err, stderr)
+	}
+	if !strings.Contains(out, `Searched "migartions" as "migrations": nothing matched as typed.`) {
+		t.Fatalf("output = %q", out)
+	}
+}
