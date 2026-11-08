@@ -13,6 +13,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/cdc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 )
 
@@ -387,5 +388,162 @@ func TestReleasedArchivedSessionsLeaveOutSharedConversationHistory(t *testing.T)
 		if deleted, err := s.DeleteTerminatedSession(ctx, id); !errors.Is(err, domain.ErrSessionHistoryShared) || deleted {
 			t.Fatalf("delete %s = %v, %v; want ErrSessionHistoryShared", id, deleted, err)
 		}
+	}
+}
+
+// accountUsageTotals sums AgentAccountUsageSince by account, day and model.
+func accountUsageTotals(t *testing.T, s *sqlite.Store, since time.Time) map[string]domain.AgentAccountUsage {
+	t.Helper()
+	rows, err := s.AgentAccountUsageSince(context.Background(), since)
+	mustNoError(t, err)
+	out := map[string]domain.AgentAccountUsage{}
+	for _, row := range rows {
+		key := row.AccountID + "|" + row.Day + "|" + row.Model
+		sum := out[key]
+		sum.InputTokens += row.InputTokens
+		sum.OutputTokens += row.OutputTokens
+		sum.CostNanos += row.CostNanos
+		out[key] = sum
+	}
+	return out
+}
+
+// A session's usage events are deleted in short batches, each folding its
+// events' spend into the deleted-session totals in the same transaction.
+// Across many batches and an account switch partway through, the account
+// usage view must not change by a token.
+func TestDeleteTerminatedSessionKeepsAccountUsageAcrossBatches(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	sess := seedUsageSession(t, s, domain.HarnessClaudeCode)
+	mustNoError(t, s.CreateAgentAccount(ctx, domain.AgentAccount{
+		ID: "acct-b", Provider: domain.AgentAccountProviderClaude, Home: "/tmp/acct-b", Email: "b@example.com", CreatedAt: t0,
+	}))
+	mustNoError(t, s.BindSessionAgentAccount(ctx, sess.ID, domain.AgentAccountProviderClaude, "device-claude", t0))
+	mustNoError(t, s.BindSessionAgentAccount(ctx, sess.ID, domain.AgentAccountProviderClaude, "acct-b", t0.Add(24*time.Hour)))
+	binding := mustUpsertUsageBinding(t, s, sess, t0, domain.UsageBindingRecord{
+		NativeRootID: "root", InitialModelID: "claude-x", State: domain.UsageBindingActive,
+	})
+	source := mustInsertUsageSource(t, s, t0, domain.UsageSourceRecord{
+		BindingID: binding.ID, Kind: domain.UsageSourceClaudeMain, NativeSessionID: "native",
+		ArtifactPath: "/tmp/claude/batches.jsonl", FileIdentity: "dev:ino", State: domain.UsageSourcePending,
+	})
+	// 600 events every 5 minutes: two days and two accounts, and many batches.
+	events := make([]domain.ModelUsageEvent, 0, 600)
+	for i := range 600 {
+		event := anthropicUsageEvent(fmt.Sprintf("event-%d", i), int64(i%7+1), 0, 0, int64(i%5+1))
+		event.CreatedAt = t0.Add(time.Duration(i) * 5 * time.Minute)
+		events = append(events, event)
+	}
+	mustNoError(t, s.ApplyUsageChunk(ctx, source.ID, 0, source.UpdatedAt, domain.SourceCursorState{
+		ByteOffset: 100, State: domain.UsageSourceActive, ParserStateJSON: `{}`, UpdatedAt: t0,
+	}, events))
+	since := t0.Truncate(24 * time.Hour)
+	want := accountUsageTotals(t, s, since)
+	if len(want) != 4 {
+		t.Fatalf("seeded usage = %+v, want two days on device-claude and two on acct-b", want)
+	}
+
+	sess.IsTerminated = true
+	mustNoError(t, s.UpdateSession(ctx, sess))
+	if deleted, err := s.DeleteTerminatedSession(ctx, sess.ID); err != nil || !deleted {
+		t.Fatalf("delete = %v, %v", deleted, err)
+	}
+	if got := accountUsageTotals(t, s, since); !reflect.DeepEqual(got, want) {
+		t.Fatalf("usage after the delete = %+v, want %+v", got, want)
+	}
+}
+
+// After a session delete nothing in any table still points at the session or
+// its conversations: the batches delete the history child-first, and the
+// final transaction's cascade takes the rest. Checked over every table with a
+// session_id or conversation_id column, so a table added later is covered.
+func TestDeleteTerminatedSessionLeavesNothingBehind(t *testing.T) {
+	dir := t.TempDir()
+	s := sqlitetest.MustOpenAt(t, dir)
+	ctx := context.Background()
+	seedProject(t, s, "gone")
+	sess := terminalSession(t, s, "gone", 0)
+	upsertFacts(t, s, domain.SessionCleanupRecord{SessionID: sess.ID, WorkspaceDisposition: domain.DispositionRemoved})
+	kept := terminalSession(t, s, "gone", 0)
+	now := time.Now().UTC()
+	raw := openRawDB(t, dir)
+	seed := func(id domain.SessionID, conversation string) {
+		t.Helper()
+		if _, err := s.CreateConversation(ctx, conversation, domain.ConversationScopeSession, "gone", id, now); err != nil {
+			t.Fatalf("create conversation: %v", err)
+		}
+		for i := range 40 {
+			created, err := s.AppendUserMessage(ctx, conversation, id, "generation-"+string(id),
+				domain.ConversationMessage{
+					ID: fmt.Sprintf("%s-msg-%d", conversation, i), Origin: domain.MessageOriginHuman,
+					Text: fmt.Sprintf("message %d", i), ClientMessageID: fmt.Sprintf("%s-client-%d", conversation, i),
+				}, fmt.Sprintf("%s-turn-%d", conversation, i), now.Add(time.Duration(i)*time.Second))
+			if err != nil || !created {
+				t.Fatalf("append message %d: created=%v err=%v", i, created, err)
+			}
+		}
+		if _, err := raw.ExecContext(ctx, `
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300)
+INSERT INTO conversation_provider_events (conversation_id, session_id, method, payload_json, received_at)
+SELECT ?1, ?2, 'message.delta', '{}', ?3 FROM n`, conversation, id, now); err != nil {
+			t.Fatalf("seed provider events: %v", err)
+		}
+		if _, err := raw.ExecContext(ctx, `
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 120)
+INSERT INTO conversation_activities (id, conversation_id, sequence, kind, status, command_output, created_at, updated_at)
+SELECT ?1 || '-activity-' || i, ?1, 1000 + i, 'command', 'completed', zeroblob(9000), ?2, ?2 FROM n`, conversation, now); err != nil {
+			t.Fatalf("seed activities: %v", err)
+		}
+	}
+	seed(sess.ID, "conv-gone")
+	seed(kept.ID, "conv-kept")
+
+	references := func(id domain.SessionID, conversation string) map[string]int {
+		t.Helper()
+		rows, err := raw.QueryContext(ctx, `
+SELECT m.name, c.name FROM sqlite_master m JOIN pragma_table_info(m.name) c
+WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND c.name IN ('session_id', 'conversation_id')
+  -- The search index's record of deleted sessions keeps the id until its next
+  -- sweep removes their documents from search.db; asserted below.
+  AND m.name <> 'session_search_deleted'`)
+		mustNoError(t, err)
+		type column struct{ table, name string }
+		var columns []column
+		for rows.Next() {
+			var col column
+			mustNoError(t, rows.Scan(&col.table, &col.name))
+			columns = append(columns, col)
+		}
+		mustNoError(t, rows.Close())
+		out := map[string]int{}
+		for _, col := range columns {
+			value := string(id)
+			if col.name == "conversation_id" {
+				value = conversation
+			}
+			if n := countRows(t, raw, `SELECT count(*) FROM "`+col.table+`" WHERE "`+col.name+`" = ?`, value); n > 0 {
+				out[col.table+"."+col.name] = n
+			}
+		}
+		return out
+	}
+	if before := references(sess.ID, "conv-gone"); len(before) < 5 {
+		t.Fatalf("seeded references = %v, want history in several tables", before)
+	}
+	keptBefore := references(kept.ID, "conv-kept")
+
+	if deleted, err := s.DeleteTerminatedSession(ctx, sess.ID); err != nil || !deleted {
+		t.Fatalf("delete = %v, %v", deleted, err)
+	}
+	if left := references(sess.ID, "conv-gone"); len(left) > 0 {
+		t.Fatalf("rows still pointing at the deleted session: %v", left)
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM session_search_deleted WHERE session_id = ?`, sess.ID); n != 1 {
+		t.Fatalf("search's record of the deleted session = %d rows, want 1", n)
+	}
+	if keptAfter := references(kept.ID, "conv-kept"); !reflect.DeepEqual(keptAfter, keptBefore) {
+		t.Fatalf("the other session's history changed: %v, was %v", keptAfter, keptBefore)
 	}
 }

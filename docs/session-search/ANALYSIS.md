@@ -1813,3 +1813,29 @@ by design:
    and compressing text on the preparing goroutines, are the next steps.
    Orca's identifier column and reading snippets back from `ao.db` are not
    needed: the index is already smaller than Orca's.
+
+### 8.15 Deleting a session in short transactions (9 Nov 2026)
+
+Not search's own code, but found while bounding search's lock time, and
+shipped with it: deleting a session held the daemon's only writer for 200 to
+700 ms on a real archive, so a chat message or a wake waited behind it.
+
+- **Cascades that grew with the database.** Nineteen foreign-key child columns
+  had no index, so every deleted session, turn and review made SQLite scan the
+  referencing table (`change_log`, 100k rows, twice). Migration
+  `20261109103000000_session_delete_fk_indexes.sql` indexes all but
+  `conversation_turns.handled_by_session_id`, whose index would pull four hot
+  turn queries off their branch and conversation indexes (EXPLAIN on the real
+  archive: 4 of 184 affected plans change, each to a narrower seek).
+  `TestEveryForeignKeyHasAnIndexOnItsChildColumns` keeps it that way.
+- **The account-usage fold scanned every usage event** to find one session's.
+  It now starts from the session's bindings, and folds each batch of usage
+  events in the transaction that deletes them.
+- **Everything is drained child-first** (provider events, activities,
+  messages, deliveries, turns, usage, artifact versions, PR checks, reports,
+  change log) in batches sized to a 2 ms budget, with the WAL copied back from
+  a reader connection between batches. The final transaction finds almost
+  nothing left: 237 ms became 2 to 14 ms.
+
+The deleted session's id stays in `session_search_deleted` until the next
+sweep removes its documents from `search.db`.

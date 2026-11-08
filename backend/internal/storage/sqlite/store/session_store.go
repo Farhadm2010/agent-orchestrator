@@ -889,8 +889,33 @@ WHERE id = ?
 // standaloneSessionIDPrefix is the id prefix of sessions with no project.
 const standaloneSessionIDPrefix = "standalone"
 
-const sessionDeleteBatch = 1000
+// A session delete removes the session's history in many short transactions
+// before the one that deletes its row, so the daemon's single writer is never
+// held for long: writes that are waiting (a chat message, a wake) run between
+// batches.
+//
+// sessionDeleteBudget is how long one of those transactions may hold the
+// writer. Rows vary from a few bytes to 64 KiB of command output, so a fixed
+// row count cannot bound the time: each drain sizes its batches from how long
+// the previous one took (sessionDeleteBatch).
+const (
+	sessionDeleteBudget     = 2 * time.Millisecond
+	sessionDeleteFirstBatch = 32
+	// sessionDeleteMinBatch keeps a loaded machine from shrinking batches to
+	// single rows: when other processes take the CPU, even a one-row
+	// transaction can run past the budget, and smaller batches only add
+	// transactions.
+	sessionDeleteMinBatch = 4
+	sessionDeleteMaxBatch = 2000
+	// sessionDeleteCheckpointEvery is how many batches a drain writes before
+	// it copies the log back into the database itself (copyLogBack).
+	sessionDeleteCheckpointEvery = 8
+)
 
+// sessionDeleteDrains delete a session's rows child-first, so that by the
+// final transaction the cascade from its row finds almost nothing left. Each
+// query deletes up to ?2 rows of session ?1, and only while the session is
+// still terminated.
 var sessionDeleteDrains = []string{
 	`DELETE FROM conversation_provider_events WHERE id IN (
     SELECT id FROM conversation_provider_events WHERE session_id = ?1 LIMIT ?2
@@ -900,11 +925,94 @@ var sessionDeleteDrains = []string{
     JOIN conversations c ON c.id = a.conversation_id
     WHERE c.session_id = ?1 LIMIT ?2
 ) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	// Each message also leaves the chat search index (its FTS delete trigger).
+	`DELETE FROM conversation_messages WHERE rowid IN (
+    SELECT m.rowid FROM conversation_messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM conversation_steer_deliveries WHERE rowid IN (
+    SELECT d.rowid FROM conversation_steer_deliveries d
+    JOIN conversations c ON c.id = d.conversation_id
+    WHERE c.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM conversation_edit_deliveries WHERE rowid IN (
+    SELECT d.rowid FROM conversation_edit_deliveries d
+    JOIN conversations c ON c.id = d.conversation_id
+    WHERE c.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM conversation_queued_edit_deliveries WHERE rowid IN (
+    SELECT d.rowid FROM conversation_queued_edit_deliveries d
+    JOIN conversations c ON c.id = d.conversation_id
+    WHERE c.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
 }
 
-// DeleteTerminatedSession removes a terminated session's row; its own
-// conversations, cleanup facts, PR facts and the other per-session rows go with
-// it through ON DELETE CASCADE. Callers decide whether the session's workspace
+// sessionDeleteUnlinks clear the RESTRICT links between the session's own
+// turns and branches (an edited or retried turn), which would otherwise refuse
+// deleting the turns they point at. A link from another conversation is left,
+// and still refuses the delete.
+var sessionDeleteUnlinks = []string{
+	`UPDATE conversation_branches
+SET parent_branch_id = NULL, fork_after_turn_id = NULL, replaced_turn_id = NULL
+WHERE conversation_id IN (SELECT id FROM conversations WHERE session_id = ?1)
+  AND (parent_branch_id IS NOT NULL OR fork_after_turn_id IS NOT NULL OR replaced_turn_id IS NOT NULL)
+  AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`UPDATE conversation_turns SET retry_of_turn_id = NULL
+WHERE conversation_id IN (SELECT id FROM conversations WHERE session_id = ?1)
+  AND retry_of_turn_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+}
+
+// sessionDeleteTurnDrain runs after the unlinks.
+const sessionDeleteTurnDrain = `DELETE FROM conversation_turns WHERE rowid IN (
+    SELECT t.rowid FROM conversation_turns t
+    JOIN conversations c ON c.id = t.conversation_id
+    WHERE c.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`
+
+// sessionDeleteLateDrains clear the rest of what the session row would
+// cascade to (artifact versions, its PR's checks and comments, reports), then
+// the change log rows that reference it without a cascade. Usage events go
+// first, through drainSessionUsage, which keeps their spend.
+var sessionDeleteLateDrains = []string{
+	`DELETE FROM session_artifact_versions WHERE rowid IN (
+    SELECT rowid FROM session_artifact_versions WHERE session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM pr_checks WHERE rowid IN (
+    SELECT c.rowid FROM pr_checks c JOIN pr p ON p.url = c.pr_url
+    WHERE p.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM pr_comment WHERE rowid IN (
+    SELECT c.rowid FROM pr_comment c JOIN pr p ON p.url = c.pr_url
+    WHERE p.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM pr_review_threads WHERE rowid IN (
+    SELECT c.rowid FROM pr_review_threads c JOIN pr p ON p.url = c.pr_url
+    WHERE p.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM pr_reviews WHERE rowid IN (
+    SELECT c.rowid FROM pr_reviews c JOIN pr p ON p.url = c.pr_url
+    WHERE p.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM report_outputs WHERE rowid IN (
+    SELECT o.rowid FROM report_outputs o JOIN reports r ON r.id = o.report_id
+    WHERE r.session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM reports WHERE rowid IN (
+    SELECT rowid FROM reports WHERE session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+	`DELETE FROM change_log WHERE seq IN (
+    SELECT seq FROM change_log WHERE session_id = ?1 LIMIT ?2
+) AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND is_terminated = 1)`,
+}
+
+// DeleteTerminatedSession removes a terminated session and its history. The
+// history goes first, child-first, in short budgeted transactions
+// (sessionDeleteDrains and the rest), so the transaction that deletes the row
+// finds almost nothing left to cascade and no transaction holds the daemon's
+// writer for long; whatever arrived meanwhile still goes with the row through
+// ON DELETE CASCADE. Callers decide whether the session's workspace
 // is released first; this only refuses live sessions and, with
 // domain.ErrSessionHistoryShared, shared conversation history. The final
 // transaction checks both again, so a concurrent restore cannot slip between
@@ -925,6 +1033,20 @@ func (s *Store) DeleteTerminatedSession(ctx context.Context, id domain.SessionID
 		return false, err
 	}
 	for _, query := range sessionDeleteDrains {
+		if err := s.drainSessionRows(ctx, query, id); err != nil {
+			return false, fmt.Errorf("delete session %s: clear history: %w", id, err)
+		}
+	}
+	if err := s.unlinkSessionTurns(ctx, id); err != nil {
+		return false, fmt.Errorf("delete session %s: unlink turns: %w", id, err)
+	}
+	if err := s.drainSessionRows(ctx, sessionDeleteTurnDrain, id); err != nil {
+		return false, fmt.Errorf("delete session %s: clear history: %w", id, err)
+	}
+	if err := s.drainSessionUsage(ctx, id); err != nil {
+		return false, fmt.Errorf("delete session %s: keep account usage: %w", id, err)
+	}
+	for _, query := range sessionDeleteLateDrains {
 		if err := s.drainSessionRows(ctx, query, id); err != nil {
 			return false, fmt.Errorf("delete session %s: clear history: %w", id, err)
 		}
@@ -951,7 +1073,8 @@ INSERT INTO session_num_floors (id_prefix, max_num) VALUES (?, ?)
 ON CONFLICT (id_prefix) DO UPDATE SET max_num = MAX(max_num, excluded.max_num)`, prefix, num); err != nil {
 		return false, fmt.Errorf("delete session %s: record number floor: %w", id, err)
 	}
-	if err := foldDeletedSessionAccountUsage(ctx, s.qw.WithTx(tx), id); err != nil {
+	// Usage events that arrived after drainSessionUsage.
+	if _, err := foldSessionAccountUsage(ctx, tx, id, -1); err != nil {
 		return false, fmt.Errorf("delete session %s: keep account usage: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1020,21 +1143,124 @@ SELECT EXISTS (
 	return projectID, num, true, nil
 }
 
+// drainSessionRows runs one drain query until it deletes less than a full
+// batch, each batch its own transaction under writeMu.
 func (s *Store) drainSessionRows(ctx context.Context, query string, id domain.SessionID) error {
-	for {
+	batch := sessionDeleteFirstBatch
+	for written := 1; ; written++ {
+		if written%sessionDeleteCheckpointEvery == 0 {
+			s.copyLogBack(ctx)
+		}
 		if err := s.writeMu.LockContext(ctx); err != nil {
 			return err
 		}
-		res, err := s.writeDB.ExecContext(ctx, query, id, sessionDeleteBatch)
+		started := time.Now()
+		res, err := s.writeDB.ExecContext(ctx, query, id, batch)
+		took := time.Since(started)
 		s.writeMu.Unlock()
 		if err != nil {
 			return err
 		}
 		n, err := res.RowsAffected()
-		if err != nil || n < sessionDeleteBatch {
+		if err != nil || n < int64(batch) {
+			return err
+		}
+		batch = sessionDeleteBatch(batch, took)
+	}
+}
+
+// sessionDeleteBatch sizes the next batch from how long the last one held the
+// writer: half as many rows when it ran over sessionDeleteBudget (never fewer
+// than sessionDeleteMinBatch), twice as many when it took under a quarter of
+// it.
+func sessionDeleteBatch(batch int, took time.Duration) int {
+	switch {
+	case took > sessionDeleteBudget:
+		return max(sessionDeleteMinBatch, batch/2)
+	case took < sessionDeleteBudget/4:
+		return min(sessionDeleteMaxBatch, batch*2)
+	}
+	return batch
+}
+
+// drainSessionUsage deletes a session's usage events in budgeted batches. Each
+// batch folds the events' spend into the deleted-session totals and deletes
+// the same events in one transaction, so the account usage view never counts
+// them twice or loses them.
+func (s *Store) drainSessionUsage(ctx context.Context, id domain.SessionID) error {
+	batch := sessionDeleteFirstBatch
+	for written := 1; ; written++ {
+		if written%sessionDeleteCheckpointEvery == 0 {
+			s.copyLogBack(ctx)
+		}
+		if err := s.writeMu.LockContext(ctx); err != nil {
+			return err
+		}
+		started := time.Now()
+		n, err := s.deleteSessionUsageBatch(ctx, id, batch)
+		took := time.Since(started)
+		s.writeMu.Unlock()
+		if err != nil || n < int64(batch) {
+			return err
+		}
+		batch = sessionDeleteBatch(batch, took)
+	}
+}
+
+func (s *Store) deleteSessionUsageBatch(ctx context.Context, id domain.SessionID, batch int) (int64, error) {
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var terminated bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ? AND is_terminated = 1)`, id,
+	).Scan(&terminated); err != nil || !terminated {
+		return 0, err
+	}
+	if _, err := foldSessionAccountUsage(ctx, tx, id, batch); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, deleteSessionUsageBatchSQL, id, batch)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+// copyLogBack copies the write-ahead log into the database from a reader
+// connection, between a drain's batches. SQLite otherwise does it inside the
+// commit that grows the log past 1,000 pages, on the writer, so a few of a
+// drain's batches each held the writer for an extra 5 to 10 ms while the log
+// was copied. A PASSIVE checkpoint takes no write lock and waits for no one;
+// when the writer's own checkpoint comes, little is left to copy. It is best
+// effort: a busy or failed pass leaves that to the writer, as before.
+func (s *Store) copyLogBack(ctx context.Context) {
+	_, _ = s.readDB.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
+}
+
+// unlinkSessionTurns runs sessionDeleteUnlinks in one short transaction.
+func (s *Store) unlinkSessionTurns(ctx context.Context, id domain.SessionID) error {
+	if err := s.writeMu.LockContext(ctx); err != nil {
+		return err
+	}
+	defer s.writeMu.Unlock()
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, query := range sessionDeleteUnlinks {
+		if _, err := tx.ExecContext(ctx, query, id); err != nil {
 			return err
 		}
 	}
+	return tx.Commit()
 }
 
 // GetSession returns the full record for a session, or ok=false if absent.

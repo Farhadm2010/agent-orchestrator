@@ -258,6 +258,7 @@ var shippedMigrations = map[int64]string{
 	20261108140000000: "20261108140000000_session_search_contentless.sql",
 	20261108200000000: "20261108200000000_session_search_lock_budget.sql",
 	20261109072438921: "20261109072438921_terminal_titles.sql",
+	20261109103000000: "20261109103000000_session_delete_fk_indexes.sql",
 	20261109120000000: "20261109120000000_conversation_turn_batch_delivery.sql",
 }
 
