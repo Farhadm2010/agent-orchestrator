@@ -40,7 +40,10 @@ func Encode(text string) []byte {
 		var buffer bytes.Buffer
 		buffer.Grow(len(text)/3 + 16)
 		buffer.WriteByte(searchBodyDeflate)
-		writer := searchBodyWriters.Get().(*flate.Writer)
+		writer, ok := searchBodyWriters.Get().(*flate.Writer)
+		if !ok || writer == nil {
+			writer, _ = flate.NewWriter(io.Discard, flate.BestSpeed)
+		}
 		writer.Reset(&buffer)
 		_, writeErr := writer.Write([]byte(text))
 		closeErr := writer.Close()
