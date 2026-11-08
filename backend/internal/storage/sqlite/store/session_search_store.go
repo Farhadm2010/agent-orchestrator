@@ -19,12 +19,6 @@ import (
 // (sessions, conversations, activities) is never written here. Reads go through
 // the reader pool, writes through the single writer connection.
 
-// sessionSearchSnippetStart and End bracket a matched term inside a snippet.
-const (
-	sessionSearchSnippetStart = domain.SessionSearchSnippetStart
-	sessionSearchSnippetEnd   = domain.SessionSearchSnippetEnd
-)
-
 // sessionSearchFilterSQL is the WHERE tail shared by the ranked search and its
 // count, so the two can never disagree about what matched. It expects the
 // documents table aliased as d; sessionSearchFilterArgs supplies its arguments.
@@ -282,7 +276,7 @@ SELECT p.id, d.session_id, d.project_id, d.harness, d.machine, d.kind,
        CASE WHEN d.source_key LIKE 'review:%' AND rv.id IS NULL THEN '' ELSE d.message_id END,
        d.seq,
        COALESCE(t.title, ''), d.created_at, p.score, p.session_matches,
-       CASE WHEN ? = 1 THEN '' ELSE COALESCE(t.body, '') END,
+       CASE WHEN ? = 1 THEN NULL ELSE t.body END,
        p.match_total, p.candidate_count,
        COALESCE(rv.id, '')
 FROM page p
@@ -303,10 +297,10 @@ SELECT s.id, COALESCE(s.project_id, ''), s.harness, '',
        COALESCE(NULLIF(s.display_name, ''), s.id),
        ` + sessionCreatedMillisSQL + `,
        0.0 AS rank,
-       COALESCE((SELECT dt.body FROM session_search_docs d
-                 JOIN session_search_text dt ON dt.id = d.id
-                 WHERE d.session_id = s.id AND dt.body <> ''
-                 ORDER BY d.seq DESC LIMIT 1), '') AS snippet
+       (SELECT dt.body FROM session_search_docs d
+        JOIN session_search_text dt ON dt.id = d.id
+        WHERE d.session_id = s.id AND length(dt.body) > 1
+        ORDER BY d.seq DESC LIMIT 1) AS snippet
 FROM sessions s` + browseSessionFilterSQL + `
 ORDER BY s.created_at DESC, s.id
 LIMIT ? OFFSET ?;`
@@ -488,7 +482,8 @@ func (s *Store) searchSessionSearchDocs(ctx context.Context, params domain.Sessi
 	for rows.Next() {
 		var hit domain.SessionSearchHit
 		var docID, createdAt, candidates int64
-		var kind, body string
+		var kind string
+		var body []byte
 		if err := rows.Scan(
 			&docID, &hit.SessionID, &hit.ProjectID, &hit.Harness, &hit.Machine, &kind, &hit.MessageID, &hit.Seq,
 			&hit.Title, &createdAt, &hit.Rank, &hit.SessionMatches, &body, &hit.MatchTotal, &candidates,
@@ -502,9 +497,9 @@ func (s *Store) searchSessionSearchDocs(ctx context.Context, params domain.Sessi
 		hit.MatchTotalCapped = capped > 0 && candidates >= int64(capped)
 		capReached = capReached || hit.MatchTotalCapped
 		if !params.SkipSnippets {
-			text := body
-			if hit.Kind == domain.SessionSearchKindTitle && hit.Title != "" {
-				text = hit.Title
+			text := hit.Title
+			if hit.Kind != domain.SessionSearchKindTitle || hit.Title == "" {
+				text = decodeSearchBody(body)
 			}
 			hit.Snippet = domain.SessionSearchSnippet(text, params.HighlightTerms)
 		}
@@ -571,12 +566,14 @@ func (s *Store) BrowseSessionSearchDocs(ctx context.Context, params domain.Sessi
 		var hit domain.SessionSearchHit
 		var createdAt int64
 		var kind string
+		var preview []byte
 		if err := rows.Scan(
 			&hit.SessionID, &hit.ProjectID, &hit.Harness, &hit.Machine, &kind, &hit.MessageID, &hit.Seq,
-			&hit.Title, &createdAt, &hit.Rank, &hit.Snippet,
+			&hit.Title, &createdAt, &hit.Rank, &preview,
 		); err != nil {
 			return nil, fmt.Errorf("scan session search browse row: %w", err)
 		}
+		hit.Snippet = decodeSearchBody(preview)
 		hit.Kind = domain.SessionSearchKind(kind)
 		hit.CreatedAt = time.UnixMilli(createdAt).UTC()
 		hits = append(hits, hit)
@@ -588,27 +585,30 @@ func (s *Store) BrowseSessionSearchDocs(ctx context.Context, params domain.Sessi
 }
 
 // SessionSearchMatchesForSession lists every indexed match for one session and
-// one expression, ordered by position. Enter/Shift+Enter stepping uses it.
-func (s *Store) SessionSearchMatchesForSession(ctx context.Context, sessionID, matchQuery string) ([]domain.SessionSearchHit, error) {
+// one expression, ordered by position. Enter/Shift+Enter stepping uses it. The
+// index is contentless, so each snippet is cut from the stored text with the
+// query's highlight terms, the same way result pages are.
+func (s *Store) SessionSearchMatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchHit, error) {
 	if sessionID == "" || matchQuery == "" {
 		return nil, nil
 	}
 	rows, err := s.readDB.QueryContext(ctx, `
 SELECT d.session_id, d.project_id, d.harness, d.machine, d.kind, d.message_id, d.seq,
-       session_search_fts.title, d.created_at,
-       bm25(session_search_fts, 8.0, 1.0, 4.0) AS rank,
-       snippet(session_search_fts, -1, ?, ?, '…', 12) AS snippet
-FROM session_search_fts
-JOIN session_search_docs d ON d.id = session_search_fts.rowid
-WHERE session_search_fts MATCH ?
-  AND d.session_id = ?
+       COALESCE(t.title, ''), d.created_at, m.rank, t.body
+FROM (
+    SELECT rowid AS id, bm25(session_search_fts, 8.0, 1.0, 4.0) AS rank
+    FROM session_search_fts
+    WHERE session_search_fts MATCH ?
+) m
+JOIN session_search_docs d ON d.id = m.id
+LEFT JOIN session_search_text t ON t.id = m.id
+WHERE d.session_id = ?
   -- Stepping walks the session's own transcript; a reviewer chat's messages
   -- are not in it and could not be scrolled to. The title is the session's
   -- name, not a place in the transcript.
   AND d.source_key NOT LIKE 'review:%'
   AND d.kind <> 'title'
 ORDER BY d.seq, d.id`,
-		sessionSearchSnippetStart, sessionSearchSnippetEnd,
 		matchQuery, sessionID,
 	)
 	if err != nil {
@@ -620,14 +620,16 @@ ORDER BY d.seq, d.id`,
 		var hit domain.SessionSearchHit
 		var createdAt int64
 		var kind string
+		var body []byte
 		if err := rows.Scan(
 			&hit.SessionID, &hit.ProjectID, &hit.Harness, &hit.Machine, &kind, &hit.MessageID, &hit.Seq,
-			&hit.Title, &createdAt, &hit.Rank, &hit.Snippet,
+			&hit.Title, &createdAt, &hit.Rank, &body,
 		); err != nil {
 			return nil, fmt.Errorf("scan session search match: %w", err)
 		}
 		hit.Kind = domain.SessionSearchKind(kind)
 		hit.CreatedAt = time.UnixMilli(createdAt).UTC()
+		hit.Snippet = domain.SessionSearchSnippet(decodeSearchBody(body), terms)
 		hits = append(hits, hit)
 	}
 	if err := rows.Err(); err != nil {
@@ -702,20 +704,25 @@ ON CONFLICT (source_key, doc_key, kind) DO UPDATE SET
     indexed_at = excluded.indexed_at
 RETURNING id;`
 
-// upsertSessionSearchTextSQL writes a document's text only when it changed.
-// Every pass rewrites the documents of a source it re-reads, and most of them
-// are unchanged; without the guard each one would cost an FTS delete and
-// re-insert (the update trigger), which is the bulk of an incremental pass.
+// upsertSessionSearchTextSQL stores a document's text: compressed, and with the
+// hash the next pass compares to decide whether the index row must change.
 const upsertSessionSearchTextSQL = `
-INSERT INTO session_search_text (id, title, body, paths) VALUES (?, ?, ?, ?)
+INSERT INTO session_search_text (id, title, paths, body, hash) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
     title = excluded.title,
+    paths = excluded.paths,
     body = excluded.body,
-    paths = excluded.paths
-WHERE title IS NOT excluded.title OR body IS NOT excluded.body OR paths IS NOT excluded.paths;`
+    hash = excluded.hash;`
 
-// UpsertSessionSearchDocs writes one batch in a single transaction, so the FTS
-// mirror and the projection advance together and a batch costs one commit.
+// UpsertSessionSearchDocs writes one batch in a single transaction, so the
+// index and the projection advance together and a batch costs one commit.
+//
+// The index rows are written last and in one statement. FTS5 flushes its
+// pending terms whenever another statement opens a savepoint in the same
+// transaction; written one document at a time, each document became its own
+// index segment, and merging those segments was most of an indexing pass.
+// Every pass also re-reads documents that did not change; their hash matches
+// and their index rows are left alone.
 func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.SessionSearchDoc) error {
 	if len(docs) == 0 {
 		return nil
@@ -730,26 +737,105 @@ func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.Sessi
 			return fmt.Errorf("prepare session search upsert: %w", err)
 		}
 		defer func() { _ = docStmt.Close() }()
+		ids := make([]int64, len(docs))
+		for index, doc := range docs {
+			if err := docStmt.QueryRowContext(ctx,
+				doc.SourceKey, doc.DocKey, doc.SessionID, doc.ProjectID, doc.Harness,
+				doc.Machine, string(doc.Kind), doc.MessageID, doc.Seq,
+				doc.CreatedAt.UnixMilli(), doc.IndexedAt.UnixMilli(),
+			).Scan(&ids[index]); err != nil {
+				return fmt.Errorf("upsert session search doc %s/%s: %w", doc.SourceKey, doc.DocKey, err)
+			}
+		}
+		stored, err := sessionSearchStoredHashes(ctx, executor, ids)
+		if err != nil {
+			return err
+		}
+		type indexRow struct {
+			id                 int64
+			title, body, paths string
+		}
+		changed := make([]indexRow, 0, len(docs))
+		replaced := make([]int64, 0, len(docs))
+		seen := make(map[int64]bool, len(docs))
+		for index, doc := range docs {
+			id := ids[index]
+			hash := searchTextHash(doc.Title, doc.Body, doc.Paths)
+			previous, exists := stored[id]
+			if (exists && previous == hash) || seen[id] {
+				continue
+			}
+			seen[id] = true
+			if exists {
+				replaced = append(replaced, id)
+			}
+			changed = append(changed, indexRow{id: id, title: doc.Title, body: doc.Body, paths: doc.Paths})
+			stored[id] = hash
+		}
+		if len(changed) == 0 {
+			return nil
+		}
 		textStmt, err := executor.PrepareContext(ctx, upsertSessionSearchTextSQL)
 		if err != nil {
 			return fmt.Errorf("prepare session search text upsert: %w", err)
 		}
 		defer func() { _ = textStmt.Close() }()
-		for _, doc := range docs {
-			var id int64
-			if err := docStmt.QueryRowContext(ctx,
-				doc.SourceKey, doc.DocKey, doc.SessionID, doc.ProjectID, doc.Harness,
-				doc.Machine, string(doc.Kind), doc.MessageID, doc.Seq,
-				doc.CreatedAt.UnixMilli(), doc.IndexedAt.UnixMilli(),
-			).Scan(&id); err != nil {
-				return fmt.Errorf("upsert session search doc %s/%s: %w", doc.SourceKey, doc.DocKey, err)
+		for _, row := range changed {
+			if _, err := textStmt.ExecContext(ctx, row.id, row.title, row.paths, encodeSearchBody(row.body), stored[row.id]); err != nil {
+				return fmt.Errorf("upsert session search text %d: %w", row.id, err)
 			}
-			if _, err := textStmt.ExecContext(ctx, id, doc.Title, doc.Body, doc.Paths); err != nil {
-				return fmt.Errorf("upsert session search text %s/%s: %w", doc.SourceKey, doc.DocKey, err)
+		}
+		if len(replaced) > 0 {
+			encoded, err := json.Marshal(replaced)
+			if err != nil {
+				return fmt.Errorf("encode replaced session search rows: %w", err)
 			}
+			if _, err := executor.ExecContext(ctx,
+				`DELETE FROM session_search_fts WHERE rowid IN (SELECT value FROM json_each(?))`, string(encoded),
+			); err != nil {
+				return fmt.Errorf("remove replaced session search index rows: %w", err)
+			}
+		}
+		rows := make([][4]any, len(changed))
+		for index, row := range changed {
+			rows[index] = [4]any{row.id, row.title, row.body, row.paths}
+		}
+		encoded, err := json.Marshal(rows)
+		if err != nil {
+			return fmt.Errorf("encode session search index rows: %w", err)
+		}
+		if _, err := executor.ExecContext(ctx, `
+INSERT INTO session_search_fts (rowid, title, body, paths)
+SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'), json_extract(value, '$[3]')
+FROM json_each(?)`, string(encoded)); err != nil {
+			return fmt.Errorf("index session search docs: %w", err)
 		}
 		return nil
 	})
+}
+
+// sessionSearchStoredHashes returns the stored text hash of each document that
+// has text, keyed by document id.
+func sessionSearchStoredHashes(ctx context.Context, executor gen.DBTX, ids []int64) (map[int64]int64, error) {
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("encode session search ids: %w", err)
+	}
+	rows, err := executor.QueryContext(ctx,
+		`SELECT id, hash FROM session_search_text WHERE id IN (SELECT value FROM json_each(?))`, string(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("read session search text hashes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	hashes := make(map[int64]int64, len(ids))
+	for rows.Next() {
+		var id, hash int64
+		if err := rows.Scan(&id, &hash); err != nil {
+			return nil, fmt.Errorf("scan session search text hash: %w", err)
+		}
+		hashes[id] = hash
+	}
+	return hashes, rows.Err()
 }
 
 // PruneSessionSearchDocsBefore removes documents for one source that were not

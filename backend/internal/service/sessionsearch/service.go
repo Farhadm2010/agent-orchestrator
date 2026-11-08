@@ -45,7 +45,7 @@ const (
 	// into their parts, so a huge command output cannot triple the index.
 	maxIdentifierSplits = 200
 	// batchSize is how many documents one transaction writes.
-	batchSize = 64
+	batchSize = 256
 	// pageSize is how many sessions one backfill page reads before yielding.
 	pageSize = 50
 	// nativeReadChunk bounds one read from a transcript.
@@ -57,7 +57,7 @@ const (
 type Store interface {
 	SearchSessionSearchDocs(ctx context.Context, params domain.SessionSearchParams) ([]domain.SessionSearchHit, error)
 	BrowseSessionSearchDocs(ctx context.Context, params domain.SessionSearchParams) ([]domain.SessionSearchHit, error)
-	SessionSearchMatchesForSession(ctx context.Context, sessionID, matchQuery string) ([]domain.SessionSearchHit, error)
+	SessionSearchMatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchHit, error)
 	SessionSearchMatchCounts(ctx context.Context, matchQuery string, sessionIDs []string) (map[string]int, error)
 	CountSessionSearchDocsMatching(ctx context.Context, params domain.SessionSearchParams) (int64, error)
 	CountSessionSearchSessionsBrowsing(ctx context.Context, params domain.SessionSearchParams) (int64, error)
@@ -375,12 +375,12 @@ func (s *Service) pinSession(ctx context.Context, hits []domain.SessionSearchHit
 
 // MatchesForSession lists every indexed match for one session, ordered by
 // position, so Enter/Shift+Enter can step through them after opening.
-func (s *Service) MatchesForSession(ctx context.Context, sessionID, matchQuery string) ([]domain.SessionSearchResult, error) {
+func (s *Service) MatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchResult, error) {
 	if s == nil || s.store == nil {
 		return nil, apierr.Unavailable("SESSION_SEARCH_UNAVAILABLE",
 			"Session search is not available on this daemon")
 	}
-	hits, err := s.store.SessionSearchMatchesForSession(ctx, sessionID, matchQuery)
+	hits, err := s.store.SessionSearchMatchesForSession(ctx, sessionID, matchQuery, terms)
 	if err != nil {
 		return nil, err
 	}

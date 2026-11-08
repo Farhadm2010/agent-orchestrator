@@ -252,6 +252,12 @@ func FoldSessionSearchText(text string) string {
 	return builder.String()
 }
 
+// SessionSearchPhraseHighlightTerms returns the tokens a snippet marks for one
+// phrase, such as the one a pasted PR link searches for.
+func SessionSearchPhraseHighlightTerms(phrase string) []SessionSearchHighlightTerm {
+	return sessionSearchHighlightTerms(phrase, false)
+}
+
 // sessionSearchHighlightTerms turns one FTS term (a word or a phrase) into the
 // tokens a snippet should mark. A phrase marks each of its tokens; a prefix
 // applies to the phrase's last token, as it does in FTS5.

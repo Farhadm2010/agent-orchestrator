@@ -275,7 +275,7 @@ func TestRowMatchCountEqualsFindBarStops(t *testing.T) {
 	if row.Results[0].ReviewID != "" || row.Results[0].MessageID == "review-msg" {
 		t.Fatalf("row = %+v, want the session's own transcript, not its reviewer chat", row.Results[0])
 	}
-	stops, err := f.svc.MatchesForSession(ctx, string(session.ID), domain.ParseSessionSearchQuery("gzip").MatchQuery)
+	stops, err := f.svc.MatchesForSession(ctx, string(session.ID), domain.ParseSessionSearchQuery("gzip").MatchQuery, domain.ParseSessionSearchQuery("gzip").HighlightTerms)
 	if err != nil {
 		t.Fatalf("MatchesForSession: %v", err)
 	}

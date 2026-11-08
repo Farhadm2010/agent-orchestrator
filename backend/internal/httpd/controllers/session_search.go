@@ -18,7 +18,7 @@ import (
 // SessionSearchService is the controller-facing session search contract.
 type SessionSearchService interface {
 	Search(ctx context.Context, parsed domain.SessionSearchParsedQuery, params domain.SessionSearchParams) (domain.SessionSearchResponse, error)
-	MatchesForSession(ctx context.Context, sessionID, matchQuery string) ([]domain.SessionSearchResult, error)
+	MatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchResult, error)
 	Coverage(ctx context.Context) (domain.SessionSearchCoverage, error)
 }
 
@@ -65,18 +65,19 @@ func (c *SessionSearchController) matches(w http.ResponseWriter, r *http.Request
 	}
 	sessionID := chi.URLParam(r, "sessionId")
 	parsed := domain.ParseSessionSearchQuery(r.URL.Query().Get("q"))
-	matchQuery := parsed.MatchQuery
+	matchQuery, terms := parsed.MatchQuery, parsed.HighlightTerms
 	if matchQuery == "" && parsed.PRRef != nil {
 		// A result opened from a pasted PR URL steps through where the PR is
 		// mentioned, the same phrase the search ranked by.
 		matchQuery = parsed.PRRef.Phrase()
+		terms = domain.SessionSearchPhraseHighlightTerms(matchQuery)
 	}
 	if matchQuery == "" {
 		envelope.WriteError(w, r, apierr.Invalid("SESSION_SEARCH_QUERY_REQUIRED",
 			"Provide q with at least one word to find matches for", nil))
 		return
 	}
-	results, err := c.Svc.MatchesForSession(r.Context(), sessionID, matchQuery)
+	results, err := c.Svc.MatchesForSession(r.Context(), sessionID, matchQuery, terms)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return

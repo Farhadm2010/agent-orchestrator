@@ -37,7 +37,7 @@ func (s *stubSessionSearch) Search(_ context.Context, parsed domain.SessionSearc
 	return s.response, s.err
 }
 
-func (s *stubSessionSearch) MatchesForSession(_ context.Context, sessionID, matchQuery string) ([]domain.SessionSearchResult, error) {
+func (s *stubSessionSearch) MatchesForSession(_ context.Context, sessionID, matchQuery string, _ []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchResult, error) {
 	s.matchArgs = [2]string{sessionID, matchQuery}
 	return s.matches, s.err
 }

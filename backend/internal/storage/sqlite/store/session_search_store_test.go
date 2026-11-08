@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -462,5 +463,42 @@ func TestSearchSessionSearchDocsPagingReturnsEveryResultOnceAcrossTheCap(t *test
 		if len(seen) != len(docs) || repeated != 0 {
 			t.Fatalf("[%s] paging returned %d distinct results (%d repeated), want all %d exactly once", group, len(seen), repeated, len(docs))
 		}
+	}
+}
+
+// The text is stored once, compressed, and snippets are cut from it: the
+// result page and the find bar's match list both still mark the matched word.
+func TestSessionSearchStoresTextCompressedAndCutsSnippetsFromIt(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s := sqlitetest.MustOpenAt(t, dir)
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "ao.db"))
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+	output := strings.Repeat("ok  	pkg/module/subpackage	0.412s\n", 200) + "FAIL zzCompressedNeedle timed out after 30s\n"
+	seedSearchDoc(t, s, domain.SessionSearchDoc{
+		SourceKey: "chat:c", DocKey: "activity:1", SessionID: "c", Kind: domain.SessionSearchKindCommand, Body: output,
+	})
+	var stored int64
+	if err := raw.QueryRow(`SELECT LENGTH(body) FROM session_search_text`).Scan(&stored); err != nil {
+		t.Fatalf("read stored body: %v", err)
+	}
+	if stored*3 > int64(len(output)) {
+		t.Fatalf("stored %d bytes for %d bytes of repetitive output, want it compressed", stored, len(output))
+	}
+	parsed := domain.ParseSessionSearchQuery("zzCompressedNeedle")
+	hits, err := s.SearchSessionSearchDocs(ctx, domain.SessionSearchParams{MatchQuery: parsed.MatchQuery, HighlightTerms: parsed.HighlightTerms})
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("search: hits=%+v err=%v", hits, err)
+	}
+	marked := domain.SessionSearchSnippetStart + "zzCompressedNeedle" + domain.SessionSearchSnippetEnd
+	if !strings.Contains(hits[0].Snippet, marked) {
+		t.Fatalf("result snippet %q does not mark the match", hits[0].Snippet)
+	}
+	matches, err := s.SessionSearchMatchesForSession(ctx, "c", parsed.MatchQuery, parsed.HighlightTerms)
+	if err != nil || len(matches) != 1 || !strings.Contains(matches[0].Snippet, marked) {
+		t.Fatalf("find bar matches = %+v (err %v), want one marked snippet", matches, err)
 	}
 }

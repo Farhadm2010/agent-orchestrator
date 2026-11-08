@@ -910,7 +910,7 @@ func TestMatchesForSessionListsEveryMatchInOrder(t *testing.T) {
 		t.Fatalf("IndexChat: %v", err)
 	}
 	parsed := domain.ParseSessionSearchQuery("retry")
-	matches, err := f.svc.MatchesForSession(context.Background(), string(session.ID), parsed.MatchQuery)
+	matches, err := f.svc.MatchesForSession(context.Background(), string(session.ID), parsed.MatchQuery, parsed.HighlightTerms)
 	if err != nil {
 		t.Fatalf("MatchesForSession: %v", err)
 	}
@@ -1025,7 +1025,7 @@ func TestSearchFindsReviewerChatsAndOpensThemWhileOpenable(t *testing.T) {
 	}
 	// Stepping walks the session's own transcript, which does not hold the
 	// reviewer's messages.
-	if matches, err := f.svc.MatchesForSession(ctx, string(session.ID), domain.ParseSessionSearchQuery("quokka").MatchQuery); err != nil || len(matches) != 0 {
+	if matches, err := f.svc.MatchesForSession(ctx, string(session.ID), domain.ParseSessionSearchQuery("quokka").MatchQuery, nil); err != nil || len(matches) != 0 {
 		t.Fatalf("in-session matches = %+v err=%v, want none from the reviewer chat", matches, err)
 	}
 	// Two sources for one session must not rewrite each other on every pass.
@@ -1091,7 +1091,7 @@ func TestGroupedRowShowsTheBestMessageAndCountsMessages(t *testing.T) {
 		t.Fatalf("match counts = %d and %d, want 2 and 1", top.SessionMatches, got.Results[1].SessionMatches)
 	}
 	// The find bar steps through exactly the messages the row counted.
-	matches, err := f.svc.MatchesForSession(context.Background(), string(named.ID), domain.ParseSessionSearchQuery("flaky login").MatchQuery)
+	matches, err := f.svc.MatchesForSession(context.Background(), string(named.ID), domain.ParseSessionSearchQuery("flaky login").MatchQuery, domain.ParseSessionSearchQuery("flaky login").HighlightTerms)
 	if err != nil {
 		t.Fatalf("MatchesForSession: %v", err)
 	}
