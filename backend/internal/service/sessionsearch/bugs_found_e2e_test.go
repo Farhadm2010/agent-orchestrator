@@ -424,7 +424,7 @@ func TestToolDetailsAreIndexedAsText(t *testing.T) {
 	appendUserMessage(t, f.store, session, "conv-tool", "tool-msg", "tool-turn", "render the workspace")
 	addActivity(t, f.store, "conv-tool", "tool-turn", domain.ConversationActivity{
 		ID: "tool-1", Kind: domain.ActivityKindMCPTool, Status: domain.ActivityStatusCompleted,
-		Detail: []byte("{\"server\":\"ao\",\"tool\":\"html_preview\",\"arguments\":{\"html\":\"\\u003cChatWorkspace quokka /\\u003e\\nnext line\"}}"),
+		Detail: []byte("{\"server\":\"ao\",\"tool\":\"html_preview\",\"arguments\":{\"query\":\"\\u003cChatWorkspace quokka /\\u003e\\nnext line\"}}"),
 	})
 	if _, err := f.svc.IndexAll(context.Background()); err != nil {
 		t.Fatalf("IndexAll: %v", err)

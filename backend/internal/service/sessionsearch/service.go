@@ -802,76 +802,72 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 	return written, nil
 }
 
-// Per-section budgets for one activity document. No section is ever cut from
-// the front to fit the others, which would discard exactly the end of a
-// failing command's output that the document exists to keep. Output has the
-// largest share: a quarter goes to its start (what ran) and the rest, 4.5 KiB,
-// to its end, so keeping the start cost none of the end it kept before.
+// Budgets for the short text of an activity that is not a tool call (a plan,
+// an approval, an error, an AO action).
 const (
 	activitySummaryBytes = 1 << 10
 	activityDetailBytes  = 2 << 10
-	activityOutputBytes  = 6 << 10
-	// outputHeadDivisor sets how much of an output budget goes to its start:
-	// a quarter. The rest keeps its end, where a failure usually is.
-	outputHeadDivisor     = 4
-	activityStreamedBytes = 1 << 10
-	// activityDiffBytes bounds the diff text indexed for one file change. A large
-	// patch is mostly context lines; the changed lines carry the signal.
-	activityDiffBytes = 6 << 10
 )
 
 // activityDoc turns one timeline activity into a searchable document.
 //
-// The kind decides the tier: a shell command and its output rank with tool
-// output, while a plan or reasoning summary is agent-authored prose. The body
-// concatenates what a reader would see: the summary, the file paths or tool
-// arguments from the detail payload, the command output, and the streamed text.
-// Long output keeps its start and its end: the end is where a failure
-// usually is, and the start names what ran (the test, the build target).
+// A command, an MCP tool or a file change is a tool row (coverage.go): the
+// tool's name and its one remembered argument, then the start of its output.
+// A file change keeps its paths, which path: and file-name searches use, but
+// not its diff. A reasoning activity is not indexed. Anything else (a plan, an
+// approval, an error, an AO action) is short text: its summary and the text
+// values of its detail.
 func (s *Service) activityDoc(conversation domain.SessionSearchConversation, activity domain.SessionSearchActivity, now time.Time) (domain.SessionSearchDoc, bool) {
-	body := strings.Builder{}
-	appendSection := func(text string) {
-		trimmed := strings.TrimSpace(text)
-		if trimmed == "" {
-			return
-		}
-		if body.Len() > 0 {
-			body.WriteString("\n\n")
-		}
-		body.WriteString(trimmed)
-	}
-	appendSection(truncateBytes(activity.Summary, activitySummaryBytes))
-	if activity.Kind == domain.ActivityKindFileChange {
-		// A file change's detail is provider JSON. Indexing it verbatim makes
-		// snippets unreadable, so the paths and the diff text are extracted and
-		// indexed instead: the added and removed lines are the reason someone
-		// searches for a function or a string they remember changing.
-		appendSection(strings.Join(pathsFromActivityDetail(activity.Detail), "\n"))
-		appendSection(diffText(activity.Detail, activityDiffBytes))
-	} else {
-		// Other details are provider JSON too (a tool's arguments, an MCP
-		// result). Its text values are what was typed or returned; indexed raw,
-		// the keys spent the budget and snippets showed escapes such as
-		// "\u003c" and a literal "\n".
-		appendSection(truncateBytes(rawJSONText(json.RawMessage(activity.Detail)), activityDetailBytes))
-	}
-	appendSection(headTailText(activity.Output, activityOutputBytes))
-	appendSection(tailText(activity.Streamed, activityStreamedBytes))
-	if strings.TrimSpace(body.String()) == "" {
-		return domain.SessionSearchDoc{}, false
-	}
 	kind := domain.SessionSearchKindTool
 	paths := ""
+	var body string
 	switch activity.Kind {
-	case domain.ActivityKindCommand:
-		kind = domain.SessionSearchKindCommand
-	case domain.ActivityKindReasoning, domain.ActivityKindPlan:
-		kind = domain.SessionSearchKindAssistant
-	case domain.ActivityKindFileChange:
-		kind = domain.SessionSearchKindPath
-		// A file change is exactly the row that carries paths, so its own paths
-		// are what path: should match.
-		paths = searchableText(strings.Join(pathsFromActivityDetail(activity.Detail), "\n"))
+	case domain.ActivityKindReasoning:
+		return domain.SessionSearchDoc{}, false
+	case domain.ActivityKindCommand, domain.ActivityKindMCPTool, domain.ActivityKindFileChange:
+		tool := activityTool(activity.Detail)
+		argument := tool.argument
+		output := activity.Output
+		if strings.TrimSpace(output) == "" {
+			output = tool.output
+		}
+		switch activity.Kind {
+		case domain.ActivityKindCommand:
+			kind = domain.SessionSearchKindCommand
+		case domain.ActivityKindFileChange:
+			kind = domain.SessionSearchKindPath
+			changed := pathsFromActivityDetail(activity.Detail)
+			// A file change is exactly the row that carries paths, so its own
+			// paths are what path: should match.
+			paths = searchableText(strings.Join(changed, "\n"))
+			if argument == "" {
+				argument = strings.Join(changed, "\n")
+			}
+		}
+		name := tool.name
+		switch {
+		case name == "" && argument == "":
+			// An activity with no recorded input (an older row): its summary
+			// is the command or the call.
+			argument = activity.Summary
+		case name == "" && activity.Kind != domain.ActivityKindCommand:
+			// A tool without a recorded name is named by its summary. A
+			// command's summary is the command itself, already the argument.
+			name = activity.Summary
+		}
+		body = toolText(name, argument, output)
+	default:
+		if activity.Kind == domain.ActivityKindPlan {
+			kind = domain.SessionSearchKindAssistant
+		}
+		body = joinSections(
+			truncateBytes(activity.Summary, activitySummaryBytes),
+			truncateBytes(rawJSONText(json.RawMessage(activity.Detail)), activityDetailBytes),
+			toolOutputText(activity.Output),
+		)
+	}
+	if strings.TrimSpace(body) == "" {
+		return domain.SessionSearchDoc{}, false
 	}
 	// Tool and command rows used to copy the session's touched paths into their
 	// own paths column. path: filters whole sessions, so that copy never helped
@@ -889,104 +885,12 @@ func (s *Service) activityDoc(conversation domain.SessionSearchConversation, act
 		MessageID: activity.AnchorMessageID,
 		Seq:       activity.Sequence,
 		Paths:     paths,
-		// The sections are already within the document budget, so this only
-		// appends identifier splits; it never truncates the tail away.
-		Body:      domain.SessionSearchSplitIdentifiers(body.String(), maxIdentifierSplits),
+		// The body is already within its caps, so this only appends the parts
+		// of split identifiers.
+		Body:      domain.SessionSearchSplitIdentifiers(body, maxIdentifierSplits),
 		CreatedAt: activity.CreatedAt,
 		IndexedAt: now,
 	}, true
-}
-
-// diffText extracts the changed lines from a file_change activity's detail.
-//
-// The detail is provider JSON with a per-file "patch" holding unified diff text.
-// Only added and removed lines are kept: context lines are the surrounding code
-// a person already knows, while the changed lines are what they remember
-// writing. Dropping the +/- markers keeps the indexed words clean, so a search
-// for a function name does not depend on guessing the marker.
-func diffText(detail string, limit int) string {
-	var builder strings.Builder
-	rest := detail
-	for {
-		index := strings.Index(rest, `"patch"`)
-		if index < 0 {
-			break
-		}
-		rest = rest[index+len(`"patch"`):]
-		colon := strings.IndexByte(rest, ':')
-		if colon < 0 {
-			break
-		}
-		rest = strings.TrimLeft(rest[colon+1:], " \t")
-		if rest == "" || rest[0] != '"' {
-			continue
-		}
-		patch, remainder, ok := readJSONString(rest[1:])
-		if !ok {
-			break
-		}
-		rest = remainder
-		for _, line := range strings.Split(patch, "\n") {
-			if line == "" {
-				continue
-			}
-			switch line[0] {
-			case '+', '-':
-				// Skip the file headers ("+++ b/x", "--- a/x"); they duplicate the
-				// path already indexed above.
-				if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
-					continue
-				}
-				builder.WriteString(strings.TrimSpace(line[1:]))
-				builder.WriteByte('\n')
-			}
-			if builder.Len() >= limit {
-				return truncateBytes(builder.String(), limit)
-			}
-		}
-	}
-	return truncateBytes(builder.String(), limit)
-}
-
-// readJSONString decodes one JSON string body (the opening quote already
-// consumed) and returns it plus the remainder after the closing quote.
-func readJSONString(raw string) (string, string, bool) {
-	var value strings.Builder
-	escaped := false
-	for index := 0; index < len(raw); index++ {
-		character := raw[index]
-		if escaped {
-			switch character {
-			case 'n':
-				value.WriteByte('\n')
-			case 't':
-				value.WriteByte('\t')
-			case 'r':
-				value.WriteByte('\r')
-			case 'u':
-				// A unicode escape is four hex digits; keep them literal rather
-				// than decoding, because the index only needs the words and a
-				// mis-decoded escape is worse than a literal one.
-				if index+4 < len(raw) {
-					value.WriteString(raw[index : index+4])
-					index += 3
-				}
-			default:
-				value.WriteByte(character)
-			}
-			escaped = false
-			continue
-		}
-		if character == '\\' {
-			escaped = true
-			continue
-		}
-		if character == '"' {
-			return value.String(), raw[index+1:], true
-		}
-		value.WriteByte(character)
-	}
-	return "", "", false
 }
 
 // pathsFromActivityDetail extracts the file paths from a file_change activity's
@@ -1068,7 +972,9 @@ func stampFingerprint(stamp domain.SessionSearchConversationStamp) string {
 //	3: activities open at their turn's message; titles carry branch and project.
 //	4: titles are dated by their session, not the pass; tool details are
 //	   indexed as their text values rather than raw JSON.
-const indexFormatVersion = 4
+//	5: Orca's coverage (coverage.go): a tool row is its name, one argument
+//	   and the first 3,072 characters of output; reasoning is not indexed.
+const indexFormatVersion = 5
 
 // stampValue renders the stamp a pass compared, or the empty string when the
 // pass had none (a backfill, which reads everything anyway).
@@ -1450,23 +1356,6 @@ func searchableText(value string) string {
 	return domain.SessionSearchSplitIdentifiers(trimmed, maxIdentifierSplits)
 }
 
-// outputGapMarker stands for the middle of a long output that is not kept.
-// The tokenizer reads it as a separator.
-const outputGapMarker = "\n…\n"
-
-// headTailText keeps the start and the end of a text longer than limit: a
-// quarter of the budget from the start, the rest from the end. Keeping only
-// the end lost the start of long output entirely: in a benchmark on real
-// transcripts, 46% of searches for words near the start of a long output
-// found nothing.
-func headTailText(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	head := truncateBytes(value, limit/outputHeadDivisor)
-	return head + outputGapMarker + tailText(value, limit-len(head)-len(outputGapMarker))
-}
-
 // textChunks splits a text into pieces of at most limit bytes, breaking at a
 // line or space near the limit when there is one, and keeps at most maxChunks
 // pieces.
@@ -1499,19 +1388,6 @@ func chunkDocKey(key string, index int) string {
 		return key
 	}
 	return fmt.Sprintf("%s#%d", key, index+1)
-}
-
-// tailText keeps the END of a long text. Command output is read to diagnose a
-// failure, and the failure is at the end.
-func tailText(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	start := len(value) - limit
-	for start < len(value) && !utf8.ValidString(value[start:]) {
-		start++
-	}
-	return value[start:]
 }
 
 // truncateBytes shortens a string to at most limit bytes without splitting a

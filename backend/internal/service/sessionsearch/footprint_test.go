@@ -88,7 +88,7 @@ func TestOneHugeCommandIsBounded(t *testing.T) {
 	session := seedChatSession(t, store, "proj", "sess-1", "conv-1")
 	appendUserMessage(t, store, session, "conv-1", "m1", "t1", "run the build")
 	// 60 KiB, just under AO's own per-command cap.
-	huge := strings.Repeat("x", 60<<10) + "\nlinker error: undefined symbol zzNeedle"
+	huge := "linker error: undefined symbol zzNeedle\n" + strings.Repeat("x", 60<<10) + "\nzzTailNeedle"
 	addCommandActivity(t, store, "conv-1", "t1", "cmd-1", "make build", huge, domain.ActivityStatusFailed)
 	if _, err := svc.IndexChat(context.Background(), conversationFor(t, store, string(session.ID))); err != nil {
 		t.Fatalf("IndexChat: %v", err)
@@ -104,9 +104,12 @@ func TestOneHugeCommandIsBounded(t *testing.T) {
 	if maxBody > 16<<10 {
 		t.Fatalf("one document is %d bytes; the per-document budget must bound it", maxBody)
 	}
-	// The tail is what a person needs, and it must survive the bound.
+	// The output keeps its first 3,072 characters (coverage.go).
 	if got := search(t, svc, "zzNeedle"); len(got.Results) != 1 {
-		t.Fatalf("the tail of a huge command was lost: %+v", got.Results)
+		t.Fatalf("the start of a huge command was lost: %+v", got.Results)
+	}
+	if got := search(t, svc, "zzTailNeedle"); len(got.Results) != 0 {
+		t.Fatalf("output past its first 3,072 characters is not indexed: %+v", got.Results)
 	}
 }
 

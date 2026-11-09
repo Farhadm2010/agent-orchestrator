@@ -48,15 +48,20 @@ type nativeLine struct {
 //	   OpenCode v2 adds tool calls, their output and reasoning.
 //	3: long command output keeps its start as well as its end; a long message
 //	   is split into chunks instead of cut at 8 KiB.
-const nativeFormat = "native-v3"
+//	4: Orca's coverage (coverage.go): a tool call is its name and one
+//	   argument, a tool result its first 3,072 characters; reasoning and edit
+//	   contents are not indexed.
+const nativeFormat = "native-v4"
 
-// nativeDocs turns one parsed unit into its documents. Command output keeps
-// its start and end in one document; a long message is split into chunks.
+// nativeDocs turns one parsed unit into its documents. A tool row is already
+// within its caps (coverage.go) and stays one document; a long message is
+// split into chunks.
 func nativeDocs(sourceKey string, target domain.SessionSearchTarget, machine string, line nativeLine, now time.Time) []domain.SessionSearchDoc {
 	var chunks []string
-	if line.kind == domain.SessionSearchKindCommand {
-		chunks = []string{headTailText(line.text, maxDocBodyBytes)}
-	} else {
+	switch line.kind {
+	case domain.SessionSearchKindCommand, domain.SessionSearchKindTool, domain.SessionSearchKindPath:
+		chunks = []string{line.text}
+	default:
 		chunks = textChunks(line.text, maxDocBodyBytes, maxMessageChunks)
 	}
 	paths := searchableText(strings.Join(line.paths, "\n"))
@@ -606,7 +611,7 @@ func claudeAttachmentUnits(line []byte, timestamp string) []nativeLine {
 // claudeContentUnits splits one Claude message into searchable units: prose is a
 // message (tiered by the record's own role), a tool call is a tool unit, and a
 // tool result is a command unit — its output is what a reader greps for when a
-// build failed.
+// build failed. Thinking is not indexed (coverage.go).
 func claudeContentUnits(raw json.RawMessage, role string) []nativeLine {
 	proseKind := domain.SessionSearchKindAssistant
 	if role == "user" {
@@ -623,12 +628,11 @@ func claudeContentUnits(raw json.RawMessage, role string) []nativeLine {
 		return []nativeLine{{kind: proseKind, text: text}}
 	}
 	var parts []struct {
-		Type     string          `json:"type"`
-		Text     string          `json:"text"`
-		Thinking string          `json:"thinking"`
-		Name     string          `json:"name"`
-		Input    json.RawMessage `json:"input"`
-		Content  json.RawMessage `json:"content"`
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Name    string          `json:"name"`
+		Input   json.RawMessage `json:"input"`
+		Content json.RawMessage `json:"content"`
 	}
 	if json.Unmarshal(raw, &parts) != nil {
 		return nil
@@ -640,18 +644,12 @@ func claudeContentUnits(raw json.RawMessage, role string) []nativeLine {
 			if strings.TrimSpace(part.Text) != "" {
 				units = append(units, nativeLine{kind: proseKind, text: part.Text})
 			}
-		case "thinking":
-			if strings.TrimSpace(part.Thinking) != "" {
-				units = append(units, nativeLine{kind: domain.SessionSearchKindAssistant, text: part.Thinking})
-			}
 		case "tool_use":
-			body := strings.TrimSpace(part.Name + "\n" + rawJSONText(part.Input))
-			if body != "" {
+			if body := toolCallText(part.Name, toolArgument(part.Input)); body != "" {
 				units = append(units, nativeLine{kind: domain.SessionSearchKindTool, text: body})
 			}
 		case "tool_result":
-			body := rawJSONText(part.Content)
-			if strings.TrimSpace(body) != "" {
+			if body := toolOutputText(toolResultText(part.Content)); body != "" {
 				units = append(units, nativeLine{kind: domain.SessionSearchKindCommand, text: body})
 			}
 		}
@@ -724,10 +722,6 @@ func codexResponseUnits(raw json.RawMessage, at time.Time) []nativeLine {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
-		Summary []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"summary"`
 		// Function-call style tool invocations.
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -749,22 +743,17 @@ func codexResponseUnits(raw json.RawMessage, at time.Time) []nativeLine {
 		if body := contentText(payload.Content); body != "" {
 			return []nativeLine{{kind: kind, text: body, at: at}}
 		}
-	case "reasoning":
-		// Reasoning is usually encrypted; its summary, when present, is prose.
-		if body := contentText(payload.Summary); body != "" {
-			return []nativeLine{{kind: domain.SessionSearchKindAssistant, text: body, at: at}}
-		}
 	case "function_call", "custom_tool_call":
 		args := payload.Arguments
 		if len(args) == 0 {
 			args = payload.Input
 		}
-		if body := strings.TrimSpace(payload.Name + "\n" + rawJSONText(args)); body != "" {
+		if body := toolCallText(payload.Name, toolArgument(args)); body != "" {
 			return []nativeLine{{kind: domain.SessionSearchKindTool, text: body, at: at}}
 		}
 	case "function_call_output", "custom_tool_call_output":
-		if strings.TrimSpace(payload.Output) != "" {
-			return []nativeLine{{kind: domain.SessionSearchKindCommand, text: payload.Output, at: at}}
+		if body := toolOutputText(payload.Output); body != "" {
+			return []nativeLine{{kind: domain.SessionSearchKindCommand, text: body, at: at}}
 		}
 	}
 	return nil
@@ -784,8 +773,6 @@ func codexItemUnits(raw json.RawMessage, at time.Time) []nativeLine {
 			Command          json.RawMessage            `json:"command"`
 			AggregatedOutput string                     `json:"aggregated_output"`
 			Output           string                     `json:"output"`
-			SummaryText      []string                   `json:"summary_text"`
-			RawContent       json.RawMessage            `json:"raw_content"`
 			Changes          map[string]codexFileChange `json:"changes"`
 			Server           string                     `json:"server"`
 			Tool             string                     `json:"tool"`
@@ -815,27 +802,28 @@ func codexItemUnits(raw json.RawMessage, at time.Time) []nativeLine {
 		if output == "" {
 			output = item.Output
 		}
-		if body := strings.TrimSpace(codexCommandText(item.Command) + "\n" + output); body != "" {
+		if body := toolText("", codexCommandText(item.Command), output); body != "" {
 			return []nativeLine{{kind: domain.SessionSearchKindCommand, text: body, at: at}}
-		}
-	case "Reasoning":
-		body := strings.TrimSpace(strings.Join(item.SummaryText, "\n\n") + "\n" + rawJSONText(item.RawContent))
-		if body != "" {
-			return []nativeLine{{kind: domain.SessionSearchKindAssistant, text: body, at: at}}
 		}
 	case "FileChange":
 		return codexFileChangeUnits(item.Changes, at)
 	case "McpToolCall":
-		body := strings.TrimSpace(strings.Join([]string{
-			item.Server, item.Tool, rawJSONText(item.Arguments), rawJSONText(item.Result), rawJSONText(item.Error),
-		}, "\n"))
-		if body != "" {
+		name := item.Tool
+		if item.Server != "" {
+			name = item.Server + "." + item.Tool
+		}
+		output := strings.TrimSpace(toolResultText(item.Result) + "\n" + toolResultText(item.Error))
+		if body := toolText(name, toolArgument(item.Arguments), output); body != "" {
 			return []nativeLine{{kind: domain.SessionSearchKindTool, text: body, at: at}}
 		}
 	case "Extension":
-		// Web search and fetch: the query, the addresses and the result titles
-		// are what a person remembers. Most Extension items carry no text.
-		if body := strings.TrimSpace(item.Query + "\n" + rawJSONText(item.Action) + "\n" + rawJSONText(item.Results)); body != "" {
+		// Web search and fetch: the query is the argument, the result titles
+		// the output. Most Extension items carry no text.
+		argument := item.Query
+		if argument == "" {
+			argument = toolArgument(item.Action)
+		}
+		if body := toolText("web_search", argument, rawJSONText(item.Results)); body != "" && argument != "" {
 			return []nativeLine{{kind: domain.SessionSearchKindTool, text: body, at: at}}
 		}
 	}
@@ -848,10 +836,7 @@ func codexItemUnits(raw json.RawMessage, at time.Time) []nativeLine {
 func codexCommandText(raw json.RawMessage) string {
 	var argv []string
 	if json.Unmarshal(raw, &argv) == nil {
-		if len(argv) >= 3 && (argv[len(argv)-2] == "-lc" || argv[len(argv)-2] == "-c") {
-			return argv[len(argv)-1]
-		}
-		return strings.Join(argv, " ")
+		return commandFromArgv(argv)
 	}
 	var command string
 	if json.Unmarshal(raw, &command) == nil {
@@ -860,62 +845,29 @@ func codexCommandText(raw json.RawMessage) string {
 	return ""
 }
 
-// codexFileChange is one file in a Codex FileChange item: an update carries a
-// unified diff, an added file its content.
+// codexFileChange is one file in a Codex FileChange item. Only a move's new
+// path is read; the diff and content are not indexed.
 type codexFileChange struct {
-	Type        string `json:"type"`
-	UnifiedDiff string `json:"unified_diff"`
-	Content     string `json:"content"`
-	MovePath    string `json:"move_path"`
+	MovePath string `json:"move_path"`
 }
 
-// codexFileChangeUnits indexes a FileChange the way AO Chat indexes one: the
-// paths go in the paths column, and the body is the lines that changed (the
-// symbol someone added or removed), not the surrounding context.
+// codexFileChangeUnits indexes a FileChange by the files it touched: they go
+// in the paths column and are the row's text. Its diff is not indexed
+// (coverage.go).
 func codexFileChangeUnits(changes map[string]codexFileChange, at time.Time) []nativeLine {
 	if len(changes) == 0 {
 		return nil
 	}
-	paths := make([]string, 0, len(changes))
-	for path := range changes {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	var body strings.Builder
 	var touched []string
-	for _, path := range paths {
-		change := changes[path]
+	for path, change := range changes {
 		touched = append(touched, path)
 		if change.MovePath != "" {
 			touched = append(touched, change.MovePath)
 		}
-		body.WriteString(path)
-		body.WriteString("\n")
-		switch {
-		case change.UnifiedDiff != "":
-			body.WriteString(changedDiffLines(change.UnifiedDiff))
-		case change.Content != "":
-			body.WriteString(change.Content)
-		}
-		body.WriteString("\n")
 	}
-	return []nativeLine{{kind: domain.SessionSearchKindPath, text: body.String(), at: at, paths: touched}}
-}
-
-// changedDiffLines keeps the added and removed lines of a unified diff, without
-// their markers and without the file headers.
-func changedDiffLines(diff string) string {
-	var out strings.Builder
-	for _, line := range strings.Split(diff, "\n") {
-		if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
-			continue
-		}
-		if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
-			out.WriteString(line[1:])
-			out.WriteString("\n")
-		}
-	}
-	return out.String()
+	sort.Strings(touched)
+	body := toolCallText("apply_patch", strings.Join(touched, "\n"))
+	return []nativeLine{{kind: domain.SessionSearchKindPath, text: body, at: at, paths: touched}}
 }
 
 // contentText joins the text parts of a provider content array.
@@ -1032,17 +984,15 @@ func readNativeTranscript(ctx context.Context, path string, offset int64, parser
 	}
 }
 
-// boundNativeText trims a unit to what its documents will keep (the start and
-// end of command output, the chunks of anything else) as the transcript is
-// read, and copies it so the line it came from can be freed. A transcript of
-// tens of megabytes of tool output then holds a few kilobytes per unit, not
-// the file.
+// boundNativeText trims a unit to what its documents will keep as the
+// transcript is read, and copies it so the line it came from can be freed. A
+// tool row is already within its caps (coverage.go); a message keeps its
+// chunks. A transcript of tens of megabytes of tool output then holds a few
+// kilobytes per unit, not the file.
 func boundNativeText(kind domain.SessionSearchKind, text string) string {
-	if kind == domain.SessionSearchKindCommand {
-		if len(text) <= maxDocBodyBytes {
-			return text
-		}
-		return strings.Clone(headTailText(text, maxDocBodyBytes))
+	switch kind {
+	case domain.SessionSearchKindCommand, domain.SessionSearchKindTool, domain.SessionSearchKindPath:
+		return strings.Clone(text)
 	}
 	if len(text) <= maxDocBodyBytes*maxMessageChunks {
 		return text

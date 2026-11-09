@@ -17,11 +17,9 @@ func filler(bytes int) string {
 	return strings.Repeat(word, bytes/len(word)+1)[:bytes]
 }
 
-// Found by the Orca benchmark: AO kept only the last 8 KiB of a long tool
-// output, so 46% of searches for words near the start of a long output found
-// nothing. The start (what ran) and the end (how it failed) are both kept now;
-// the middle of a very long output is still dropped.
-func TestLongCommandOutputKeepsItsStartAndItsEnd(t *testing.T) {
+// A tool's output is indexed to its first 3,072 characters, as Orca does
+// (coverage.go): what ran and how it started; the rest of a long log is not.
+func TestLongCommandOutputKeepsItsFirst3072Characters(t *testing.T) {
 	root := t.TempDir()
 	f := newFixture(t, sessionsearch.TranscriptRoots{ClaudeProjects: root})
 	seedTUIProject(t, f.store, "proj")
@@ -34,13 +32,13 @@ func TestLongCommandOutputKeepsItsStartAndItsEnd(t *testing.T) {
 	if _, err := f.svc.IndexAll(context.Background()); err != nil {
 		t.Fatalf("IndexAll: %v", err)
 	}
-	for _, needle := range []string{"zzHeadNeedle", "zzTailNeedle"} {
-		if got := search(t, f.svc, needle).Results; len(got) != 1 {
-			t.Fatalf("%s: results = %s, want the long output", needle, describe(got))
-		}
+	if got := search(t, f.svc, "zzHeadNeedle").Results; len(got) != 1 {
+		t.Fatalf("results = %s, want the start of the long output", describe(got))
 	}
-	if got := search(t, f.svc, "zzMiddleNeedle").Results; len(got) != 0 {
-		t.Fatalf("the middle of a 24 KiB output is not kept, got %s", describe(got))
+	for _, needle := range []string{"zzMiddleNeedle", "zzTailNeedle"} {
+		if got := search(t, f.svc, needle).Results; len(got) != 0 {
+			t.Fatalf("%s: output past its first 3,072 characters is not kept, got %s", needle, describe(got))
+		}
 	}
 }
 
@@ -67,28 +65,30 @@ func TestLongMessageIsSearchableToItsEndAndCountsOnce(t *testing.T) {
 	}
 }
 
-// The same two gaps in AO Chat: a long message keeps its end, and a long
-// command output keeps its start.
-func TestChatLongMessageAndLongOutputKeepBothEnds(t *testing.T) {
+// The same rules in AO Chat: a long message is searchable to its end, and a
+// long command output to its first 3,072 characters.
+func TestChatLongMessageToItsEndAndLongOutputToItsStart(t *testing.T) {
 	f := newFixture(t, sessionsearch.TranscriptRoots{})
 	session := seedChatSession(t, f.store, "proj", "sess-chat-long", "conv-chat-long")
 	appendUserMessage(t, f.store, session, "conv-chat-long", "msg-long", "turn-long",
 		"please look "+filler(18<<10)+" zzChatPromptEndNeedle")
 	addCommandActivity(t, f.store, "conv-chat-long", "turn-long", "act-long", "go test ./...",
-		// The deep-tail word sits 3.8 KiB from the end: the old 4 KiB tail kept
-		// it, so keeping the start must not shorten the tail (found by the E2E
-		// run on real sessions, a word in a 10 KB build log).
 		"zzChatOutputHeadNeedle "+filler(12<<10)+" zzChatDeepTailNeedle "+filler(3800)+" FAIL zzChatOutputTailNeedle", domain.ActivityStatusFailed)
 	if _, err := f.svc.IndexAll(context.Background()); err != nil {
 		t.Fatalf("IndexAll: %v", err)
 	}
-	for _, needle := range []string{"zzChatPromptEndNeedle", "zzChatOutputHeadNeedle", "zzChatDeepTailNeedle", "zzChatOutputTailNeedle"} {
+	for _, needle := range []string{"zzChatPromptEndNeedle", "zzChatOutputHeadNeedle"} {
 		got := search(t, f.svc, needle).Results
 		if len(got) != 1 {
 			t.Fatalf("%s: results = %s", needle, describe(got))
 		}
 		if needle == "zzChatPromptEndNeedle" && got[0].MessageID != "msg-long" {
 			t.Fatalf("a later chunk must open the message it belongs to, got %q", got[0].MessageID)
+		}
+	}
+	for _, needle := range []string{"zzChatDeepTailNeedle", "zzChatOutputTailNeedle"} {
+		if got := search(t, f.svc, needle).Results; len(got) != 0 {
+			t.Fatalf("%s: output past its first 3,072 characters is not kept, got %s", needle, describe(got))
 		}
 	}
 }

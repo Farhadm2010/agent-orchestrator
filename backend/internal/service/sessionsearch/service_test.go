@@ -328,31 +328,31 @@ func TestIndexChatIndexesCommandOutput(t *testing.T) {
 	}
 }
 
-// A long command output keeps its END: a failure is diagnosed from the tail.
-func TestCommandOutputKeepsTheTail(t *testing.T) {
+// A long command output keeps its first 3,072 characters (coverage.go).
+func TestCommandOutputKeepsItsStart(t *testing.T) {
 	f := newFixture(t, sessionsearch.TranscriptRoots{})
 	session := seedChatSession(t, f.store, "proj", "sess-1", "conv-1")
 	appendUserMessage(t, f.store, session, "conv-1", "msg-1", "turn-1", "run the build")
-	// AO caps one command's output at 64 KiB; this fixture stays inside that cap
-	// and longer than the index's own per-document budget, so the test proves the
-	// index keeps the tail rather than the head.
 	padding := make([]byte, 16<<10)
 	for index := range padding {
 		padding[index] = 'x'
 	}
 	addCommandActivity(t, f.store, "conv-1", "turn-1", "activity-cmd", "make build",
-		string(padding)+"\nlinker error: undefined symbol zzNeedle", domain.ActivityStatusFailed)
+		"linker error: undefined symbol zzNeedle\n"+string(padding)+"\nzzTailNeedle", domain.ActivityStatusFailed)
 	if _, err := f.svc.IndexChat(context.Background(), conversationFor(t, f.store, string(session.ID))); err != nil {
 		t.Fatalf("IndexChat: %v", err)
 	}
 	if got := search(t, f.svc, "zzNeedle"); len(got.Results) != 1 {
-		t.Fatalf("tail of a long command output missing: %+v", got.Results)
+		t.Fatalf("start of a long command output missing: %+v", got.Results)
+	}
+	if got := search(t, f.svc, "zzTailNeedle"); len(got.Results) != 0 {
+		t.Fatalf("output past its first 3,072 characters is not indexed: %+v", got.Results)
 	}
 }
 
-// A file change carries the actual diff. Someone searching for a symbol they
-// remember editing must find the changed line, not only the file name.
-func TestIndexChatIndexesDiffText(t *testing.T) {
+// A file change is found by the files it touched, not by the code it wrote
+// (coverage.go).
+func TestIndexChatIndexesFileChangePathsNotDiffs(t *testing.T) {
 	f := newFixture(t, sessionsearch.TranscriptRoots{})
 	session := seedChatSession(t, f.store, "proj", "sess-1", "conv-1")
 	appendUserMessage(t, f.store, session, "conv-1", "msg-1", "turn-1", "add the retry guard")
@@ -367,32 +367,18 @@ func TestIndexChatIndexesDiffText(t *testing.T) {
 	if _, err := f.svc.IndexChat(context.Background(), conversationFor(t, f.store, string(session.ID))); err != nil {
 		t.Fatalf("IndexChat: %v", err)
 	}
-
-	// A word that appears only inside the added diff line.
-	added := search(t, f.svc, "handleSubmit")
-	if len(added.Results) == 0 {
-		t.Fatal("a symbol added by the diff is not searchable")
+	got := search(t, f.svc, "login.ts")
+	if len(got.Results) != 1 || got.Results[0].Kind != domain.SessionSearchKindPath {
+		t.Fatalf("path results = %+v, want the file change", got.Results)
 	}
-	if added.Results[0].Kind != domain.SessionSearchKindPath {
-		t.Fatalf("kind = %q, want path for a file change", added.Results[0].Kind)
-	}
-	// A word that appears only inside the removed diff line.
-	removed := search(t, f.svc, "false")
-	if len(removed.Results) == 0 {
-		t.Fatal("a symbol removed by the diff is not searchable")
-	}
-	// The path still matches on its own.
-	if got := search(t, f.svc, "login.ts"); len(got.Results) == 0 {
-		t.Fatal("the touched path is not searchable")
-	}
-	// Diff context lines and the "+++"/"---" headers must not be indexed as if
-	// they were changed code.
-	if got := search(t, f.svc, "context"); len(got.Results) != 0 {
-		t.Fatalf("a context line was indexed: %+v", got.Results)
+	if got := search(t, f.svc, "handleSubmit"); len(got.Results) != 0 {
+		t.Fatalf("diff text is not indexed, got %+v", got.Results)
 	}
 }
 
-func TestIndexChatIndexesToolAndReasoningActivities(t *testing.T) {
+// A tool call is indexed by its name and remembered argument; a reasoning
+// activity is not indexed (coverage.go).
+func TestIndexChatIndexesToolCallsButNotReasoning(t *testing.T) {
 	f := newFixture(t, sessionsearch.TranscriptRoots{})
 	session := seedChatSession(t, f.store, "proj", "sess-1", "conv-1")
 	appendUserMessage(t, f.store, session, "conv-1", "msg-1", "turn-1", "look into the retry loop")
@@ -408,13 +394,13 @@ func TestIndexChatIndexesToolAndReasoningActivities(t *testing.T) {
 	if _, err := f.svc.IndexChat(context.Background(), conversationFor(t, f.store, string(session.ID))); err != nil {
 		t.Fatalf("IndexChat: %v", err)
 	}
-	tool := search(t, f.svc, "flaky upload timeout")
-	if len(tool.Results) != 1 || tool.Results[0].Kind != domain.SessionSearchKindTool {
-		t.Fatalf("tool args results = %+v", tool.Results)
+	tool := searchWith(t, f.svc, "flaky upload timeout", domain.SessionSearchParams{Group: domain.SessionSearchGroupMessage})
+	if len(tool.Results) != 1 || tool.Results[0].Kind != domain.SessionSearchKindTool ||
+		!strings.Contains(tool.Results[0].Snippet, "search_issues") {
+		t.Fatalf("tool results = %+v, want the call by its name and query", tool.Results)
 	}
-	reasoning := search(t, f.svc, "backoff counter")
-	if len(reasoning.Results) != 1 || reasoning.Results[0].Kind != domain.SessionSearchKindAssistant {
-		t.Fatalf("reasoning results = %+v", reasoning.Results)
+	if reasoning := search(t, f.svc, "backoff counter"); len(reasoning.Results) != 0 {
+		t.Fatalf("reasoning is not indexed, got %+v", reasoning.Results)
 	}
 }
 

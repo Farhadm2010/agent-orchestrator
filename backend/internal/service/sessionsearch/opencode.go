@@ -194,7 +194,7 @@ ORDER BY COALESCE(time_created, 0), id`, sessionID)
 // 47 KB of prose. Reading only the text parts left nearly all of it
 // unsearchable. Each part is its own unit, with the kind AO Chat gives the same
 // thing: a command and its output, a file change with its path, a tool call,
-// or prose.
+// or prose. Reasoning parts are not indexed (coverage.go).
 func openCodeMessageUnits(role, data string) []nativeLine {
 	var payload struct {
 		Text    string          `json:"text"`
@@ -223,10 +223,6 @@ func openCodeMessageUnits(role, data string) []nativeLine {
 			if strings.TrimSpace(part.Text) != "" {
 				units = append(units, nativeLine{kind: proseKind, text: part.Text})
 			}
-		case "reasoning":
-			if strings.TrimSpace(part.Text) != "" {
-				units = append(units, nativeLine{kind: domain.SessionSearchKindAssistant, text: part.Text})
-			}
 		case "tool":
 			if unit, ok := openCodeToolUnit(part.Name, part.State); ok {
 				units = append(units, unit)
@@ -239,35 +235,37 @@ func openCodeMessageUnits(role, data string) []nativeLine {
 // openCodeToolRun is a tool part's state: what it was asked to do, what it
 // printed, and the error if it failed.
 type openCodeToolRun struct {
-	Input struct {
-		Command   string `json:"command"`
-		Path      string `json:"path"`
-		Content   string `json:"content"`
-		OldString string `json:"oldString"`
-		NewString string `json:"newString"`
-		URL       string `json:"url"`
-		Query     string `json:"query"`
-	} `json:"input"`
+	Input   json.RawMessage `json:"input"`
 	Content json.RawMessage `json:"content"`
 	Error   json.RawMessage `json:"error"`
 }
 
-// openCodeToolUnit turns one tool part into a unit.
+// openCodeToolUnit turns one tool part into a unit: its name and remembered
+// argument, then the start of its output (coverage.go). A shell command is a
+// command row; a file read, written or edited is a path row whose path goes in
+// the paths column. Written and edited contents are not indexed.
 func openCodeToolUnit(name string, run openCodeToolRun) (nativeLine, bool) {
-	output := strings.TrimSpace(rawJSONText(run.Content) + "\n" + rawJSONText(run.Error))
+	output := strings.TrimSpace(toolResultText(run.Content) + "\n" + toolResultText(run.Error))
+	body := toolText(name, toolArgument(run.Input), output)
+	if body == "" {
+		return nativeLine{}, false
+	}
+	var input struct {
+		Command  string `json:"command"`
+		Path     string `json:"path"`
+		FilePath string `json:"filePath"`
+	}
+	_ = json.Unmarshal(run.Input, &input)
+	path := input.Path
+	if path == "" {
+		path = input.FilePath
+	}
 	switch {
-	case run.Input.Command != "":
-		return nativeLine{kind: domain.SessionSearchKindCommand, text: run.Input.Command + "\n" + output}, true
-	case run.Input.Path != "":
-		// write carries the file's content; edit the text it replaced and its
-		// replacement. Both are what someone searches for later.
-		body := strings.Join([]string{run.Input.Path, run.Input.Content, run.Input.OldString, run.Input.NewString}, "\n")
-		return nativeLine{kind: domain.SessionSearchKindPath, text: body, paths: []string{run.Input.Path}}, true
+	case input.Command != "":
+		return nativeLine{kind: domain.SessionSearchKindCommand, text: body}, true
+	case path != "":
+		return nativeLine{kind: domain.SessionSearchKindPath, text: body, paths: []string{path}}, true
 	default:
-		body := strings.TrimSpace(strings.Join([]string{name, run.Input.URL, run.Input.Query, output}, "\n"))
-		if body == "" {
-			return nativeLine{}, false
-		}
 		return nativeLine{kind: domain.SessionSearchKindTool, text: body}, true
 	}
 }

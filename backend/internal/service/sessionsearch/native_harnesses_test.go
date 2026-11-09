@@ -286,9 +286,13 @@ func TestNativeCodexRolloutWithBothStreamsIndexesEachMessageOnce(t *testing.T) {
 	if len(results.Results) != 1 || results.Results[0].SessionMatches != 1 {
 		t.Fatalf("results = %+v, want one session with one match", results.Results)
 	}
-	// The edit is found by a symbol it added and by the file it touched.
-	if got := search(t, f.svc, "quokkaTicker"); len(got.Results) != 1 || got.Results[0].Kind != domain.SessionSearchKindPath {
+	// The edit is found by the file it touched, not by the code it wrote
+	// (coverage.go).
+	if got := search(t, f.svc, "reaper.go"); len(got.Results) != 1 || got.Results[0].Kind != domain.SessionSearchKindPath {
 		t.Fatalf("file change = %+v", got.Results)
+	}
+	if got := search(t, f.svc, "quokkaTicker"); len(got.Results) != 0 {
+		t.Fatalf("diff text is not indexed, got %+v", got.Results)
 	}
 	if got := search(t, f.svc, "reaper path:src/reaper.go"); len(got.Results) != 1 {
 		t.Fatalf("path filter = %+v", got.Results)

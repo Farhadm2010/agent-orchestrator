@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -40,8 +41,8 @@ func TestParseClaudeTranscriptLine(t *testing.T) {
 		if len(call) != 1 || call[0].kind != domain.SessionSearchKindTool {
 			t.Fatalf("tool call units = %+v", call)
 		}
-		if call[0].text == "" || !strings.Contains(call[0].text, "go build ./...") {
-			t.Fatalf("tool call text lost its arguments: %q", call[0].text)
+		if call[0].text != "Bash: go build ./..." {
+			t.Fatalf("tool call text = %q, want its name and command", call[0].text)
 		}
 
 		result := parseClaudeTranscriptLine([]byte(`{"type":"user","message":{"role":"user",` +
@@ -54,10 +55,10 @@ func TestParseClaudeTranscriptLine(t *testing.T) {
 		}
 	})
 
-	t.Run("thinking is agent-authored", func(t *testing.T) {
+	t.Run("thinking is not indexed", func(t *testing.T) {
 		units := parseClaudeTranscriptLine([]byte(`{"type":"assistant","message":{"role":"assistant",` +
 			`"content":[{"type":"thinking","thinking":"the retry loop never resets its counter"}]}}`))
-		if len(units) != 1 || units[0].kind != domain.SessionSearchKindAssistant {
+		if len(units) != 0 {
 			t.Fatalf("units = %+v", units)
 		}
 	})
@@ -134,7 +135,7 @@ func TestParseCodexTranscriptLine(t *testing.T) {
 		}
 	})
 
-	t.Run("file changes index their paths and changed lines", func(t *testing.T) {
+	t.Run("file changes index their paths, not their diffs", func(t *testing.T) {
 		units := parseCodexTranscriptLine([]byte(`{"timestamp":"x","type":"event_msg","payload":{"type":"item_completed",`+
 			`"item":{"type":"FileChange","changes":{`+
 			`"src/retry.ts":{"type":"update","unified_diff":"--- a/src/retry.ts\n+++ b/src/retry.ts\n@@ -1 +1 @@\n context line\n-const backoff = 1\n+const backoff = retryWithJitter()\n","move_path":null},`+
@@ -145,27 +146,23 @@ func TestParseCodexTranscriptLine(t *testing.T) {
 		if strings.Join(units[0].paths, ",") != "docs/NEW.md,src/retry.ts" {
 			t.Fatalf("paths = %v", units[0].paths)
 		}
-		body := units[0].text
-		if !strings.Contains(body, "retryWithJitter") || !strings.Contains(body, "const backoff = 1") || !strings.Contains(body, "Quokka guide") {
-			t.Fatalf("changed lines missing: %q", body)
-		}
-		if strings.Contains(body, "context line") || strings.Contains(body, "+++") {
-			t.Fatalf("diff context or headers indexed: %q", body)
+		if body := units[0].text; body != "apply_patch: docs/NEW.md\nsrc/retry.ts" {
+			t.Fatalf("body = %q, want the tool and the files it touched", body)
 		}
 	})
 
-	t.Run("MCP calls, web searches and reasoning summaries", func(t *testing.T) {
+	t.Run("MCP calls and web searches; reasoning is not indexed", func(t *testing.T) {
 		mcp := parseCodexTranscriptLine([]byte(`{"timestamp":"x","type":"event_msg","payload":{"type":"item_completed",`+
 			`"item":{"type":"McpToolCall","server":"github","tool":"search_issues","arguments":{"query":"flaky login"},`+
 			`"result":{"content":[{"type":"text","text":"issue 4821 flaky login"}],"isError":false}}}}`), true)
-		if len(mcp) != 1 || mcp[0].kind != domain.SessionSearchKindTool || !strings.Contains(mcp[0].text, "issue 4821") ||
-			!strings.Contains(mcp[0].text, "search_issues") {
+		if len(mcp) != 1 || mcp[0].kind != domain.SessionSearchKindTool ||
+			!strings.HasPrefix(mcp[0].text, "github.search_issues: flaky login") || !strings.Contains(mcp[0].text, "issue 4821") {
 			t.Fatalf("mcp units = %+v", mcp)
 		}
 		web := parseCodexTranscriptLine([]byte(`{"timestamp":"x","type":"event_msg","payload":{"type":"item_completed",`+
 			`"item":{"type":"Extension","kind":"web.search","query":"sqlite busy_timeout","action":{"type":"openPage","url":"https://sqlite.org/pragma.html"},`+
 			`"results":[{"type":"text_result","domain":"sqlite.org","title":"Pragma statements supported by SQLite","snippet":"busy_timeout sets a handler","url":"https://sqlite.org/pragma.html"}]}}}`), true)
-		if len(web) != 1 || !strings.Contains(web[0].text, "busy_timeout") || !strings.Contains(web[0].text, "sqlite.org") ||
+		if len(web) != 1 || !strings.HasPrefix(web[0].text, "web_search: sqlite busy_timeout") ||
 			!strings.Contains(web[0].text, "Pragma statements") {
 			t.Fatalf("web units = %+v", web)
 		}
@@ -176,13 +173,8 @@ func TestParseCodexTranscriptLine(t *testing.T) {
 		}
 		reasoning := parseCodexTranscriptLine([]byte(`{"timestamp":"x","type":"event_msg","payload":{"type":"item_completed",`+
 			`"item":{"type":"Reasoning","summary_text":["weighing the ticker leak"],"raw_content":[]}}}`), true)
-		if len(reasoning) != 1 || reasoning[0].kind != domain.SessionSearchKindAssistant {
+		if len(reasoning) != 0 {
 			t.Fatalf("reasoning units = %+v", reasoning)
-		}
-		// Encrypted reasoning with no summary has nothing to index.
-		if units := parseCodexTranscriptLine([]byte(`{"timestamp":"x","type":"event_msg","payload":{"type":"item_completed",`+
-			`"item":{"type":"Reasoning","summary_text":[],"raw_content":[]}}}`), true); len(units) != 0 {
-			t.Fatalf("empty reasoning produced %+v", units)
 		}
 	})
 
@@ -194,7 +186,7 @@ func TestParseCodexTranscriptLine(t *testing.T) {
 		}
 		call := parseCodexTranscriptLine([]byte(`{"timestamp":"2026-08-09T12:00:04Z","type":"response_item",`+
 			`"payload":{"type":"function_call","name":"shell","arguments":{"cmd":"rg backoff src"}}}`), false)
-		if len(call) != 1 || call[0].kind != domain.SessionSearchKindTool || !strings.Contains(call[0].text, "rg backoff src") {
+		if len(call) != 1 || call[0].kind != domain.SessionSearchKindTool || call[0].text != "shell: rg backoff src" {
 			t.Fatalf("call units = %+v", call)
 		}
 		output := parseCodexTranscriptLine([]byte(`{"timestamp":"2026-08-09T12:00:05Z","type":"response_item",`+
@@ -204,7 +196,7 @@ func TestParseCodexTranscriptLine(t *testing.T) {
 		}
 		summary := parseCodexTranscriptLine([]byte(`{"timestamp":"x","type":"response_item",`+
 			`"payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"checking the ticker"}],"encrypted_content":"opaque"}}`), false)
-		if len(summary) != 1 || !strings.Contains(summary[0].text, "checking the ticker") {
+		if len(summary) != 0 {
 			t.Fatalf("reasoning summary units = %+v", summary)
 		}
 	})
@@ -291,23 +283,26 @@ func TestOpenCodeMessageUnits(t *testing.T) {
 		for _, unit := range units {
 			kinds = append(kinds, string(unit.kind))
 		}
-		if strings.Join(kinds, ",") != "assistant,assistant,command,path,path,tool,command" {
+		// The reasoning part is not indexed.
+		if strings.Join(kinds, ",") != "assistant,command,path,path,tool,command" {
 			t.Fatalf("kinds = %v", kinds)
 		}
-		if !strings.Contains(units[2].text, "go test ./reaper") || !strings.Contains(units[2].text, "TestShutdown deadlock") {
-			t.Fatalf("shell unit = %q", units[2].text)
+		if !strings.HasPrefix(units[1].text, "shell: go test ./reaper") || !strings.Contains(units[1].text, "TestShutdown deadlock") {
+			t.Fatalf("shell unit = %q", units[1].text)
 		}
-		if units[3].paths[0] != "reaper/reaper.go" || !strings.Contains(units[3].text, "TryLock") {
-			t.Fatalf("edit unit = %+v", units[3])
+		// An edit or a write keeps its path, not the text it wrote.
+		if units[2].paths[0] != "reaper/reaper.go" || units[2].text != "edit: reaper/reaper.go" {
+			t.Fatalf("edit unit = %+v", units[2])
 		}
-		if units[4].paths[0] != "docs/SHUTDOWN.md" || !strings.Contains(units[4].text, "Quokka shutdown") {
-			t.Fatalf("write unit = %+v", units[4])
+		if units[3].paths[0] != "docs/SHUTDOWN.md" || units[3].text != "write: docs/SHUTDOWN.md" {
+			t.Fatalf("write unit = %+v", units[3])
 		}
-		if !strings.Contains(units[5].text, "go.dev/doc/faq") || !strings.Contains(units[5].text, "mutex faq") {
-			t.Fatalf("webfetch unit = %q", units[5].text)
+		// A fetch has none of the remembered arguments; its output is kept.
+		if units[4].text != "webfetch\n\nmutex faq" {
+			t.Fatalf("webfetch unit = %q", units[4].text)
 		}
-		if !strings.Contains(units[6].text, "lint timed out") {
-			t.Fatalf("failed shell unit = %q", units[6].text)
+		if !strings.Contains(units[5].text, "lint timed out") {
+			t.Fatalf("failed shell unit = %q", units[5].text)
 		}
 	})
 	t.Run("control payloads carry nothing", func(t *testing.T) {
@@ -366,19 +361,19 @@ func TestReadNativeTranscriptBoundsEachUnit(t *testing.T) {
 	if err != nil || len(lines) != 2 {
 		t.Fatalf("lines = %d, err = %v", len(lines), err)
 	}
-	// Command output keeps one document's worth (its start and end); prose
-	// keeps as many chunks as a message may become.
-	if got := len(lines[0].text); got > maxDocBodyBytes {
-		t.Fatalf("command unit holds %d bytes, want at most %d", got, maxDocBodyBytes)
+	// A command row is the command and the first 3,072 characters of its
+	// output (coverage.go); prose keeps as many chunks as a message may become.
+	if got := utf8.RuneCountInString(lines[0].text); got > len("make")+2+toolOutputChars {
+		t.Fatalf("command unit holds %d characters, want the command and %d of output", got, toolOutputChars)
 	}
 	if got := len(lines[1].text); got > maxDocBodyBytes*maxMessageChunks {
 		t.Fatalf("user unit holds %d bytes, want at most %d", got, maxDocBodyBytes*maxMessageChunks)
 	}
-	if !strings.HasSuffix(lines[0].text, "zzFinalError") {
-		t.Fatal("command output must keep its end, where the failure is")
+	if !strings.HasPrefix(lines[0].text, "make\n\nnoise noise") {
+		t.Fatalf("command row = %.40q, want the command, then the start of its output", lines[0].text)
 	}
-	if head, _, found := strings.Cut(lines[0].text, outputGapMarker); !found || !strings.Contains(head, "noise noise") {
-		t.Fatal("command output must keep its start too, before the gap")
+	if strings.Contains(lines[0].text, "zzFinalError") {
+		t.Fatal("output past its first 3,072 characters is not indexed")
 	}
 	if !strings.HasPrefix(lines[1].text, "zzOpening") {
 		t.Fatal("prose must keep its start")
