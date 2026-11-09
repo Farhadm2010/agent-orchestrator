@@ -995,6 +995,65 @@ func (s *Store) SessionSearchOrphanSessions(ctx context.Context, limit int) ([]s
 	return ids, rows.Err()
 }
 
+// sessionSearchMissingBatch is how many session ids one write records as
+// deleted. Each write is a few primary-key lookups, well inside the app
+// database's lock budget.
+const sessionSearchMissingBatch = 256
+
+// MarkSessionSearchSessionsMissing records as deleted every session the index
+// holds that the app database does not have, and returns how many it recorded.
+//
+// A session delete records itself (the sessions_search_ad trigger). This is
+// for an index that outlived its database's history. A backup of ao.db keeps
+// the owner token, so restored beside the current search.db it passes the
+// owner check (search_db.go) while the index still holds sessions created
+// after the backup. Nothing recorded those as deleted, so they stayed in
+// results for good. Recorded here, search ignores them at once and the sweep
+// removes their documents, exactly as for a deleted session.
+func (s *Store) MarkSessionSearchSessionsMissing(ctx context.Context) (int, error) {
+	rows, err := s.readDB.QueryContext(ctx, `
+SELECT held.session_id FROM (
+    SELECT session_id FROM session_search_sources
+    UNION
+    SELECT session_id FROM session_search_docs
+) held
+WHERE held.session_id != ''
+  AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = held.session_id)
+  AND held.session_id NOT IN (SELECT session_id FROM session_search_deleted)`)
+	if err != nil {
+		return 0, fmt.Errorf("list indexed sessions missing from the database: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scan indexed session: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate indexed sessions: %w", err)
+	}
+	recorded := 0
+	for start := 0; start < len(ids); start += sessionSearchMissingBatch {
+		batch := ids[start:min(start+sessionSearchMissingBatch, len(ids))]
+		// Checked again where it is written: the read above and this write are
+		// two connections, and a session created in between is not missing.
+		result, err := s.writeDB.ExecContext(ctx, `
+INSERT OR IGNORE INTO session_search_deleted (session_id)
+SELECT value FROM json_each(?)
+WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = value)`, jsonArray(batch))
+		if err != nil {
+			return recorded, fmt.Errorf("record sessions missing from the database: %w", err)
+		}
+		if count, err := result.RowsAffected(); err == nil {
+			recorded += int(count)
+		}
+	}
+	return recorded, nil
+}
+
 // DeleteSessionSearchSession removes a deleted session's documents, in short
 // transactions, then its sources.
 func (s *Store) DeleteSessionSearchSession(ctx context.Context, sessionID string) error {

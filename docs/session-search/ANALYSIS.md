@@ -1883,6 +1883,27 @@ sends one find request per result and none for a match outside a message's
 words or without text; `session-search-reveal` sets `find` only for user and
 assistant matches.
 
+**Two fixes from review (10 Nov).**
+
+- **The match waits for its conversation.** An orchestrator with nothing
+  cached, and a switch from the terminal, first render a placeholder
+  conversation whose id is the session's. Find opened on it, then closed
+  itself when the real conversation arrived under its own id (`useChatFind`
+  resets on a conversation change), and the unchanged request never opened it
+  again. `SessionChatSurface` now takes the match from the hand-off at once
+  (bringing the chat forward) and applies it only once the chat is rendering
+  the daemon's conversation, the scroll as well as find.
+- **A find request is dropped once applied** (`onFindRequestHandled`, the same
+  rule as the scroll request). The timeline remounts when its conversation
+  reloads, and a request still held would have opened find again after the
+  reader closed it.
+
+Tests: an orchestrator result opened with no cached conversation holds the
+match while the placeholder is shown and applies it when the conversation
+loads; the surface drops the request once the chat reports it applied;
+`ChatWorkspace` opens find for a request, reports it, and a remount does not
+open it again. The first and third fail without their fix.
+
 ### 8.17 A quoted phrase across a chunk break (10 Nov 2026)
 
 Found in review. A long message's chunks (§8.12) shared no text, and each
@@ -1920,3 +1941,40 @@ valid UTF-8, the review's case holds the phrase in its second chunk);
 `TestNativeQuotedPhraseAcrossAChunkBreakIsFound` search the quoted phrase and
 check the word in both chunks is still one match. All three fail with the
 overlap set to 0.
+
+### 8.18 An index newer than its database (10 Nov 2026)
+
+Found in review. §8.13 ties `search.db` to its `ao.db` by a token, so an index
+beside another database is cleared. A backup of the same `ao.db` carries the
+same token. Restored beside the current `search.db`, it passes that check while
+the index still holds sessions created after the backup. Search hides a
+session only when its delete was recorded (`session_search_deleted`), and
+nothing recorded these, so they stayed in results for good and opened nothing.
+
+- **The fix.** A backfill, which runs when the daemon starts, first compares
+  the sessions the index holds with the `sessions` table and records the ones
+  the database does not have as deleted (`MarkSessionSearchSessionsMissing`).
+  That is the path a deleted session already takes: search ignores it at once,
+  and the sweep removes its documents and then the record.
+- **Why at the start of a backfill.** A database file is only replaced while
+  the daemon is stopped, so its next start is when the two can differ.
+- **Sessions the backup does have** need nothing new. A conversation whose
+  stamp differs from the one the index recorded is read again, and a re-read
+  removes documents its messages no longer back. A session deleted after the
+  backup is back in the database with no index rows, and is indexed again.
+- **Cost.** One read on a reader connection: 8 ms over 60,000 documents (twice
+  this Mac's archive), nothing written when nothing is missing. Recording 300
+  missing sessions took two writes, 3.5 ms together. Each write checks again
+  that the session is missing, since the read is another connection.
+- **The other direction** (an older `search.db` beside a newer `ao.db`) goes
+  through the same check and the existing stamps, but is not tested.
+
+Tests: `TestRestoringAnOlderDatabaseDropsTheSessionsItDoesNotHave` backs up
+an initialized database, indexes another session and another message, and
+restores only the backup: the later session and the later message stop being
+results, a session deleted since the backup is found again, the sweep removes
+the dropped documents, and a second backfill writes nothing. It fails without
+the check.
+`TestIndexedSessionsMissingFromTheDatabaseAreRecordedAsDeleted` covers the
+store method: only missing sessions are recorded, a source with no documents
+counts, and a second check adds nothing.

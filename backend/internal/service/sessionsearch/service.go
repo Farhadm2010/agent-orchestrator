@@ -85,6 +85,7 @@ type Store interface {
 	SessionSearchSourceDocs(ctx context.Context, sourceKey string) ([]domain.SessionSearchDocRef, error)
 	DeleteSessionSearchDocsByID(ctx context.Context, ids []int64) error
 	SessionSearchOrphanSessions(ctx context.Context, limit int) ([]string, error)
+	MarkSessionSearchSessionsMissing(ctx context.Context) (int, error)
 	DeleteSessionSearchSession(ctx context.Context, sessionID string) error
 	CountSessionSearchDocsForSource(ctx context.Context, sourceKey string) (int64, error)
 	UpsertSessionSearchSource(ctx context.Context, source domain.SessionSearchSource) error
@@ -1130,6 +1131,22 @@ func (s *Service) removeDeletedSessions(ctx context.Context) {
 	}
 }
 
+// dropSessionsMissingFromTheDatabase hides, and queues for removal, the
+// sessions the index holds that the app database no longer has. The index is a
+// separate file, so it can be newer than its database: after a backup of ao.db
+// is restored, it still holds the sessions created since. A backfill starts
+// with this because a restore happens while the daemon is stopped.
+func (s *Service) dropSessionsMissingFromTheDatabase(ctx context.Context) {
+	missing, err := s.store.MarkSessionSearchSessionsMissing(ctx)
+	if err != nil {
+		s.log.Warn("session search could not check its sessions against the database", "error", err)
+		return
+	}
+	if missing > 0 {
+		s.log.Info("session search dropped sessions the database no longer has", "sessions", missing)
+	}
+}
+
 // IndexAll backfills every session, in pages, yielding between them. It returns
 // how many documents were written. A failure on one source is recorded on that
 // source and does not stop the rest: an unreadable transcript must not hide the
@@ -1162,6 +1179,7 @@ func (s *Service) indexAll(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	s.state = "backfilling"
 	s.mu.Unlock()
+	s.dropSessionsMissingFromTheDatabase(ctx)
 	conversations, err := s.store.ListSessionSearchConversations(ctx)
 	if err != nil {
 		return 0, err

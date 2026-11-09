@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -638,6 +639,61 @@ func TestTheIndexIsClearedWhenItsSchemaVersionChanges(t *testing.T) {
 	parsed := domain.ParseSessionSearchQuery("zzversioned")
 	if hits, err := s.SearchSessionSearchDocs(ctx, domain.SessionSearchParams{MatchQuery: parsed.MatchQuery, HighlightTerms: parsed.HighlightTerms}); err != nil || len(hits) != 1 {
 		t.Fatalf("search after the rebuild: %d hits, err %v", len(hits), err)
+	}
+}
+
+// The index is its own file and can hold sessions its database no longer has
+// (an older backup of ao.db restored beside it). Those are recorded as
+// deleted, so search drops them at once and the sweep removes their documents.
+// A session the database has, and one already recorded, are left alone.
+func TestIndexedSessionsMissingFromTheDatabaseAreRecordedAsDeleted(t *testing.T) {
+	ctx := context.Background()
+	s, conversation := sessionSearchFixture(t)
+	present := string(conversation.SessionID)
+	seedSearchDoc(t, s, domain.SessionSearchDoc{
+		SourceKey: "chat:" + present, DocKey: "m1", SessionID: present, Kind: domain.SessionSearchKindUser, Body: "zzpresent words",
+	})
+	seedSearchDoc(t, s, domain.SessionSearchDoc{
+		SourceKey: "chat:gone", DocKey: "m1", SessionID: "gone", Kind: domain.SessionSearchKindUser, Body: "zzgone words",
+	})
+	// A source with no documents is indexed state too.
+	if err := s.UpsertSessionSearchSource(ctx, domain.SessionSearchSource{
+		SourceKey: "chat:empty", Kind: domain.SessionSearchSourceChat, SessionID: "empty",
+		State: domain.SessionSearchSourceActive, UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatalf("UpsertSessionSearchSource: %v", err)
+	}
+	find := func(word string) int {
+		t.Helper()
+		parsed := domain.ParseSessionSearchQuery(word)
+		hits, err := s.SearchSessionSearchDocs(ctx, domain.SessionSearchParams{MatchQuery: parsed.MatchQuery, HighlightTerms: parsed.HighlightTerms})
+		if err != nil {
+			t.Fatalf("search %s: %v", word, err)
+		}
+		return len(hits)
+	}
+	if find("zzgone") != 1 {
+		t.Fatal("the fixture must find the missing session's document before it is recorded")
+	}
+
+	recorded, err := s.MarkSessionSearchSessionsMissing(ctx)
+	if err != nil || recorded != 2 {
+		t.Fatalf("recorded %d (err %v), want the 2 sessions the database does not have", recorded, err)
+	}
+	orphans, err := s.SessionSearchOrphanSessions(ctx, 10)
+	if err != nil {
+		t.Fatalf("SessionSearchOrphanSessions: %v", err)
+	}
+	sort.Strings(orphans)
+	if strings.Join(orphans, ",") != "empty,gone" {
+		t.Fatalf("recorded as deleted = %v, want empty and gone, not the session the database has", orphans)
+	}
+	if find("zzgone") != 0 || find("zzpresent") != 1 {
+		t.Fatalf("hits: gone=%d present=%d, want 0 and 1", find("zzgone"), find("zzpresent"))
+	}
+	// Already recorded: a second check has nothing to add.
+	if again, err := s.MarkSessionSearchSessionsMissing(ctx); err != nil || again != 0 {
+		t.Fatalf("a second check recorded %d (err %v), want 0", again, err)
 	}
 }
 
