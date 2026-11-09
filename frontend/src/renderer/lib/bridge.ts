@@ -453,6 +453,10 @@ export const aoBridge: AoBridge =
 			takePendingShareLink: async () => null,
 			takePendingSignIn: async () => null,
 		},
+		sessionLinks: {
+			onOpen: () => () => undefined,
+			takePending: async () => null,
+		},
 		cloudCp: {
 			request: async () => {
 				throw new Error("Orchestrator Cloud requests require the desktop app.");

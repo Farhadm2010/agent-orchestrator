@@ -506,6 +506,10 @@ if (typeof window !== "undefined") {
 			takePendingShareLink: async () => null,
 			takePendingSignIn: async () => null,
 		},
+		sessionLinks: {
+			onOpen: () => () => undefined,
+			takePending: async () => null,
+		},
 		cloudCp: {
 			request: async () => ({ status: 401, headers: {}, body: "" }),
 			requestBinary: async () => ({ status: 401, headers: {}, body: new Uint8Array() }),
