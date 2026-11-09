@@ -4482,7 +4482,5 @@
 	"command.sessionMatches_many": "{{count}} correspondências",
 	"search.matchCount_one": "{{count}} correspondência",
 	"search.matchCount_other": "{{count}} correspondências",
-	"search.matchCount_many": "{{count}} correspondências",
-	"chat.findLabel": "Buscar na conversa",
-	"chat.findPlaceholder": "Buscar na conversa…"
+	"search.matchCount_many": "{{count}} correspondências"
 }

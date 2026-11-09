@@ -86,29 +86,3 @@ export function useSessionSearchIndexStatus(hostId: HostId = LOCAL_HOST, enabled
 		},
 	});
 }
-
-/**
- * The in-session match list, used to step through matches with Enter and
- * Shift+Enter after a result opens.
- */
-export function useSessionSearchMatches(
-	sessionId: string | undefined,
-	matchQuery: string,
-	hostId: HostId = LOCAL_HOST,
-	enabled = true,
-) {
-	const trimmed = matchQuery.trim();
-	return useQuery({
-		queryKey: ["session-search-matches", hostId, sessionId ?? "", trimmed],
-		enabled: enabled && Boolean(sessionId) && trimmed.length > 0,
-		staleTime: 30_000,
-		retry: false,
-		queryFn: async (): Promise<components["schemas"]["SessionSearchResult"][]> => {
-			const { data, error } = await clientForSessionHost(hostId).GET("/api/v1/sessions/{sessionId}/search/matches", {
-				params: { path: { sessionId: sessionId! }, query: { q: trimmed } },
-			});
-			if (error) throw apiErrorException(error, "Could not list matches");
-			return data?.matches ?? [];
-		},
-	});
-}

@@ -4369,7 +4369,5 @@
 	"command.sessionMatches_one": "{{count}} Treffer",
 	"command.sessionMatches_other": "{{count}} Treffer",
 	"search.matchCount_one": "{{count}} Treffer",
-	"search.matchCount_other": "{{count}} Treffer",
-	"chat.findLabel": "In der Unterhaltung suchen",
-	"chat.findPlaceholder": "In der Unterhaltung suchen…"
+	"search.matchCount_other": "{{count}} Treffer"
 }

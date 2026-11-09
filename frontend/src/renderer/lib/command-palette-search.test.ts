@@ -50,7 +50,8 @@ describe("buildSessionSearchCommands", () => {
 			sessionId: "proj-1",
 			messageId: "msg-1",
 			snippet: "the flaky login test",
-			query: "flaky",
+			// What matched decides whether the session opens find in chat.
+			matchKind: "user",
 			// The matched span, so the opened message highlights the matched word.
 			highlights: [{ start: 4, end: 9 }],
 		});

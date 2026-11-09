@@ -18,10 +18,11 @@ export type SessionSearchReveal = {
 	/** The matched text inside that message, highlighted in place. */
 	text: string;
 	/**
-	 * The search that produced the match. The opened session's find bar starts
-	 * with it, so Enter/Shift+Enter step through the session's other matches.
+	 * Whether the opened session starts find in chat on text. Only for a match
+	 * in a message's own words: find in chat searches user and assistant text,
+	 * so a match in tool output or a path would open it on "No results".
 	 */
-	query?: string;
+	find?: boolean;
 };
 
 const pending = new Map<string, SessionSearchReveal>();
@@ -81,7 +82,8 @@ export type SessionSearchMatchTarget = {
 	snippet: string;
 	/** Matched spans in the snippet (UTF-16 offsets, as the daemon returns them). */
 	highlights?: ReadonlyArray<{ start: number; end: number }>;
-	query: string;
+	/** What matched (user, assistant, tool, command, path, title). */
+	matchKind?: string;
 	/** Set when the match is in one of the session's reviewer chats. */
 	reviewId?: string;
 };
@@ -105,9 +107,9 @@ export function sessionSearchMatchText(
 /**
  * Hands a search result's match to the session it opens, before navigating.
  *
- * A match in the session's own transcript goes through this module, which also
- * carries the query so Enter/Shift+Enter can step through the session's other
- * matches. A match in a reviewer chat goes through the same focus request the
+ * A match in the session's own transcript goes through this module. When the
+ * match is in a message's words, the opened session also starts find in chat on
+ * the matched word, so Enter/Shift+Enter step through its other occurrences. A match in a reviewer chat goes through the same focus request the
  * palette's chat search uses (useChatMessageFocus): it is the one that brings
  * the reviewer chat forward, and two channels for one job would drift.
  */
@@ -121,7 +123,7 @@ export function revealSessionSearchMatch(target: SessionSearchMatchTarget): void
 	requestSessionSearchReveal(target.sessionId, {
 		messageId: target.messageId,
 		text,
-		query: target.query,
+		find: target.matchKind === "user" || target.matchKind === "assistant",
 	});
 }
 

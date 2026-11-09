@@ -96,7 +96,8 @@ export type CommandAction =
 			sessionId: string;
 			messageId: string;
 			snippet: string;
-			query: string;
+			/** What matched (user, assistant, tool, command, path, title). */
+			matchKind?: string;
 			/** Set when the match is in one of the session's reviewer chats. */
 			reviewId?: string;
 			/** Matched spans in the snippet; the first is what the message highlights. */
@@ -960,7 +961,7 @@ export function buildSessionSearchCommands(
 				sessionId: hit.sessionId,
 				messageId: hit.messageId ?? "",
 				snippet: hit.snippet,
-				query,
+				...(hit.kind ? { matchKind: hit.kind } : {}),
 				...(hit.reviewId ? { reviewId: hit.reviewId } : {}),
 				...(hit.highlights?.length ? { highlights: hit.highlights } : {}),
 			},

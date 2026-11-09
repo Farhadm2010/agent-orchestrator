@@ -3957,23 +3957,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/sessions/{sessionId}/search/matches": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List every indexed match for one session, in position order */
-        get: operations["listSessionSearchMatches"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/sessions/{sessionId}/send": {
         parameters: {
             query?: never;
@@ -7620,9 +7603,6 @@ export interface components {
         };
         SessionSearchIndexStatusResponse: {
             coverage: components["schemas"]["SessionSearchCoverage"];
-        };
-        SessionSearchMatchesResponse: {
-            matches: components["schemas"]["SessionSearchResult"][];
         };
         SessionSearchResponse: {
             corrections?: components["schemas"]["SessionSearchCorrection"][];
@@ -23379,59 +23359,6 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-        };
-    };
-    listSessionSearchMatches: {
-        parameters: {
-            query: {
-                /** @description The same words or operators used for the search that opened the session. */
-                q: string;
-            };
-            header?: never;
-            path: {
-                /** @description Session identifier, e.g. project-1. */
-                sessionId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionSearchMatchesResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-            /** @description Not Implemented */
-            501: {
                 headers: {
                     [name: string]: unknown;
                 };

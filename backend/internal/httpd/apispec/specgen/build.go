@@ -661,9 +661,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersSessionSearchHighlight":           "SessionSearchHighlight",
 	"ControllersSessionSearchCoverage":            "SessionSearchCoverage",
 	"ControllersSessionSearchCorrection":          "SessionSearchCorrection",
-	"ControllersSessionSearchMatchesResponse":     "SessionSearchMatchesResponse",
 	"ControllersSessionSearchIndexStatusResponse": "SessionSearchIndexStatusResponse",
-	"ControllersSessionSearchMatchesQuery":        "SessionSearchMatchesQuery",
 	"ControllersMobileDeviceResponse":             "MobileDeviceResponse",
 	"ControllersMobileDevicesResponse":            "MobileDevicesResponse",
 	"ControllersInstallIDParam":                   "InstallIDParam",
@@ -860,14 +858,6 @@ func sessionSearchOperations() []operation {
 			summary: "Report what the session search index covers",
 			resps: append([]respUnit{
 				{http.StatusOK, controllers.SessionSearchIndexStatusResponse{}},
-			}, commonErrors...),
-		},
-		{
-			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/search/matches", id: "listSessionSearchMatches", tag: "sessions",
-			summary:    "List every indexed match for one session, in position order",
-			pathParams: []any{controllers.SessionIDParam{}, controllers.SessionSearchMatchesQuery{}},
-			resps: append([]respUnit{
-				{http.StatusOK, controllers.SessionSearchMatchesResponse{}},
 			}, commonErrors...),
 		},
 	}

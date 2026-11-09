@@ -4351,7 +4351,5 @@
 	"command.sessionMatches_one": "{{count}} 个匹配",
 	"command.sessionMatches_other": "{{count}} 个匹配",
 	"search.matchCount_one": "{{count}} 个匹配",
-	"search.matchCount_other": "{{count}} 个匹配",
-	"chat.findLabel": "在对话中查找",
-	"chat.findPlaceholder": "在对话中查找…"
+	"search.matchCount_other": "{{count}} 个匹配"
 }

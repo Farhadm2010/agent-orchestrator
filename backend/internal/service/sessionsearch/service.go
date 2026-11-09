@@ -66,7 +66,6 @@ const (
 type Store interface {
 	SearchSessionSearchDocs(ctx context.Context, params domain.SessionSearchParams) ([]domain.SessionSearchHit, error)
 	BrowseSessionSearchDocs(ctx context.Context, params domain.SessionSearchParams) ([]domain.SessionSearchHit, error)
-	SessionSearchMatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchHit, error)
 	SessionSearchVocabDocs(ctx context.Context, prefix string) (int64, error)
 	SessionSearchVocabCandidates(ctx context.Context, first string, minRunes, maxRunes int, minDocs int64) ([]domain.SessionSearchVocabTerm, error)
 	SessionSearchMatchCounts(ctx context.Context, matchQuery string, sessionIDs []string) (map[string]int, error)
@@ -394,33 +393,6 @@ func (s *Service) pinSession(ctx context.Context, hits []domain.SessionSearchHit
 		hits = hits[:params.Limit]
 	}
 	return hits, true, nil
-}
-
-// MatchesForSession lists every indexed match for one session, ordered by
-// position, so Enter/Shift+Enter can step through them after opening.
-func (s *Service) MatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchResult, error) {
-	if s == nil || s.store == nil {
-		return nil, apierr.Unavailable("SESSION_SEARCH_UNAVAILABLE",
-			"Session search is not available on this daemon")
-	}
-	hits, err := s.store.SessionSearchMatchesForSession(ctx, sessionID, matchQuery, terms)
-	if err != nil {
-		return nil, err
-	}
-	// One stop per message: a message and the tool output shown with it are one
-	// place to land, which is also how the row's match count counts them.
-	seen := make(map[string]bool, len(hits))
-	unique := hits[:0]
-	for _, hit := range hits {
-		if hit.MessageID != "" {
-			if seen[hit.MessageID] {
-				continue
-			}
-			seen[hit.MessageID] = true
-		}
-		unique = append(unique, hit)
-	}
-	return s.toResults(ctx, unique), nil
 }
 
 func (s *Service) toResults(ctx context.Context, hits []domain.SessionSearchHit) []domain.SessionSearchResult {

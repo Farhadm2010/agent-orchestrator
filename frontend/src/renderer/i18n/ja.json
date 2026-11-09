@@ -4369,7 +4369,5 @@
 	"command.sessionMatches_one": "{{count}}件の一致",
 	"command.sessionMatches_other": "{{count}}件の一致",
 	"search.matchCount_one": "{{count}}件の一致",
-	"search.matchCount_other": "{{count}}件の一致",
-	"chat.findLabel": "会話内を検索",
-	"chat.findPlaceholder": "会話内を検索…"
+	"search.matchCount_other": "{{count}}件の一致"
 }

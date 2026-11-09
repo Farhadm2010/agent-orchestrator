@@ -139,7 +139,8 @@ session and show the snippet, not to fake a scroll.
 Enter/Shift+Enter to move between matches. `ChatWorkspace`'s annotation
 navigation handles one target at a time, so this feature carries an ordered list
 of matches for the open session and re-issues `annotationNavigationRequest` per
-step — reusing the scroll/highlight path rather than duplicating it.
+step — reusing the scroll/highlight path rather than duplicating it. (Since
+§8.16 the stepping is main's find in chat, opened on the matched word.)
 
 ---
 
@@ -290,8 +291,8 @@ baseline that fails `go test` on regression.
   more matches the session holds (`group=message` lists every match). Selecting
   a result opens the session at the
   matching message with the match highlighted; Enter/Shift+Enter then step
-  through the session's other matches. A modifier action copies the resume
-  command.
+  through the session's other matches (main's find in chat, §8.16). A modifier
+  action copies the resume command.
 
 #### 2.7.1 Cmd+K palette behavior (as shipped)
 
@@ -1217,8 +1218,8 @@ chats included, because that row's count includes their matches.
 
 **Two hand-offs, one entry point.** Both surfaces open a result through
 `revealSessionSearchMatch`. A match in the session's own chat uses
-`session-search-reveal`, which also carries the query so Enter/Shift+Enter can
-step through the session's other matches; a reviewer-chat match uses main's
+`session-search-reveal`, which also says whether the match is in a message's
+words, so the session opens find in chat on it (§8.16); a reviewer-chat match uses main's
 `requestChatMessageFocus` (consumed by `useChatMessageFocus`), which is what
 brings the reviewer chat forward. They end in the same annotation navigation;
 `selectSessionTerminal` (behind `onSelectChat`) also closes an active file tab,
@@ -1276,7 +1277,7 @@ Dhruv's decision for Cmd+K, applied to the Search page too:
 | One blended score, title weighted higher | A session scores as its best document (title documents included; the title column weighs 8× in bm25) plus 0.25 × the rest. The title document now also carries branch and project, at body weight, so a branch match counts but under a name match |
 | Show the best-matching message, query marked | The row is the session's best document *that opens somewhere*: messages first, tool and command output via the message of their turn (`AnchorMessageID`), the title last. Its snippet is cut in Go with the matched words marked |
 | A match count ("· 7 matches") | `sessionMatches` is distinct matched messages, without the title; a message and the tool output shown with it count once. Palette: "you · 7 matches · project · agent"; Search page: "7 matches"; CLI: "(7 matches)" |
-| Enter opens at the best message, find bar prefilled, Enter / Shift+Enter step | `SessionFindBar` over the Chat transcript: the query typed in, "1/7", previous/next, Esc to close; editing the query searches again from the first match. It steps through the same set the count counts (`MatchesForSession`, one stop per message). The opened message highlights the matched word, not the whole snippet |
+| Enter opens at the best message, find bar prefilled, Enter / Shift+Enter step | *Replaced by main's find in chat on 10 Nov, §8.16.* `SessionFindBar` over the Chat transcript: the query typed in, "1/7", previous/next, Esc to close; editing the query searches again from the first match. It steps through the same set the count counts (`MatchesForSession`, one stop per message). The opened message highlights the matched word, not the whole snippet |
 
 **A bug this found.** The search hooks called `clientForHost(hostId)` with the
 local host, and `clientForHost` throws for the local host (it is for remote
@@ -1839,3 +1840,45 @@ shipped with it: deleting a session held the daemon's only writer for 200 to
 
 The deleted session's id stays in `session_search_deleted` until the next
 sweep removes its documents from `search.db`.
+
+### 8.16 Stepping through matches with main's find in chat (10 Nov 2026)
+
+Main shipped find in chat (#7684): Cmd+F over a conversation's whole history,
+served by `/api/v1/conversations/{id}/find`, with its own bar, count, paging
+and highlights. This branch had its own find bar for the same job
+(`SessionFindBar`, fed by `/api/v1/sessions/{id}/search/matches`). Two bars
+over one transcript would disagree, so on rebasing this branch uses main's and
+drops its own:
+
+- **Opening a result** still scrolls to the message and marks the matched word
+  (the annotation navigation). When the match is in a user or assistant
+  message, `SessionChatSurface` then hands `ChatWorkspace` a `findRequest`, and
+  `useChatFind.openWith` opens find already searching for that word, its first
+  match at that message (`anchorMessageId`). Each result is a new request, so a
+  second result for the same word searches again from its own message.
+- **Not for other matches.** Find in chat searches user and assistant text on
+  the visible branch, so a word matched in tool or command output, a path or
+  the session name would open it on "No results". Those results open at the
+  message and mark the word without opening find (`find` on the reveal, set
+  from the result's kind).
+- **Removed:** `SessionFindBar`, `useSessionSearchMatches`, the
+  `/sessions/{id}/search/matches` endpoint with its service and store methods,
+  and two locale strings.
+
+What changes for a person:
+
+- Find steps through occurrences of the **matched word**, not messages that
+  match the whole query; for `flaky login` it opens on the word the best
+  message marked first. Edit the bar to search for something else.
+- The row's "· 7 matches" counts matching messages across the session's
+  transcripts, tool output included; find counts occurrences of one word in
+  message text. The two numbers can differ.
+- A corrected search (§8.12) marks the corrected word, so find opens on it,
+  not on the typo (`TestACorrectedResultMarksTheCorrectedWord`).
+
+Tests: `useChatFind.test.tsx` opens with a word and an anchor and checks the
+request carries the anchor and the bar lands on the server's initial match,
+then opens again with the same word at another message; `SessionChatSurface`
+sends one find request per result and none for a match outside a message's
+words or without text; `session-search-reveal` sets `find` only for user and
+assistant matches.

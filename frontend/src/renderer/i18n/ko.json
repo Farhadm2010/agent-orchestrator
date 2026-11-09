@@ -4369,7 +4369,5 @@
 	"command.sessionMatches_one": "{{count}}개 일치",
 	"command.sessionMatches_other": "{{count}}개 일치",
 	"search.matchCount_one": "{{count}}개 일치",
-	"search.matchCount_other": "{{count}}개 일치",
-	"chat.findLabel": "대화에서 찾기",
-	"chat.findPlaceholder": "대화에서 찾기…"
+	"search.matchCount_other": "{{count}}개 일치"
 }

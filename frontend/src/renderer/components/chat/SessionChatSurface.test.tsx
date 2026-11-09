@@ -1,6 +1,6 @@
 import type { ChatDraftExcerptReference } from "../../lib/chat-drafts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -179,13 +179,13 @@ vi.mock("./ChatWorkspace", async () => {
 			onSend,
 			composerNotice,
 			importBlock,
-			timelineOverlay,
+			findRequest,
 		}: {
 			importBlock?: string;
 			onSend: typeof sideMocks.workspaceSend;
 			onAddToSideChat?: typeof sideMocks.attach;
 			composerNotice?: ReactNode;
-			timelineOverlay?: ReactNode;
+			findRequest?: { id: string; query: string; messageId?: string };
 			agentSwitch?: AgentSwitchProps;
 			annotationNavigationRequest?: { id: string; text: string; messageId?: string };
 			agentInputDisabled?: boolean;
@@ -231,7 +231,7 @@ vi.mock("./ChatWorkspace", async () => {
 					))}
 					{snapshot.harness === "claude-code" && <TurnSettingsBar models={models} settings={snapshot.settings} harness={snapshot.harness} configOptions={configOptions} onChangeConfigOption={() => {}} />}
 					<div data-testid="prompt-suggestion">{promptSuggestion?.text}</div>
-					{timelineOverlay}
+					<div data-testid="find-request" data-request-id={findRequest?.id ?? ""}>{findRequest ? `${findRequest.query}@${findRequest.messageId ?? ""}` : ""}</div>
 					<div data-testid="annotation-request">{annotationNavigationRequest?.messageId ?? ""}</div>
 					<div data-testid="annotation-text">{annotationNavigationRequest?.text ?? ""}</div>
 					<button type="button" onClick={() => { void Promise.resolve(onContinueTurn?.()).catch(() => {}); }}>Continue test turn</button>
@@ -473,7 +473,6 @@ describe("SessionChatSurface search reveal", () => {
 		requestSessionSearchReveal("sess-1", {
 			messageId: "msg-1",
 			text: "the flaky login test",
-			query: "flaky",
 		});
 		render(
 			<Wrapper client={client}>
@@ -507,117 +506,61 @@ describe("SessionChatSurface search reveal", () => {
 		expect(peekSessionSearchReveal("sess-1")).toBeUndefined();
 	});
 
-	function mockMatches(byQuery: Record<string, Array<{ messageId: string; snippet: string; highlights: Array<{ start: number; end: number }> }>>) {
-		getMock.mockImplementation(async (path: string, options?: { params?: { query?: { q?: string } } }) => {
-			if (path === "/api/v1/sessions/{sessionId}/search/matches") {
-				const q = options?.params?.query?.q ?? "";
-				return { data: { matches: (byQuery[q] ?? []).map((match) => ({ sessionId: "sess-1", kind: "user", ...match })) }, error: undefined };
-			}
-			return { data: {}, error: undefined, response: { status: 200 } };
-		});
-	}
-
-	it("opens the find bar with the search typed in and steps through the session's matches", async () => {
-		mockMatches({
-			flaky: [
-				{ messageId: "msg-1", snippet: "the flaky login test", highlights: [{ start: 4, end: 9 }] },
-				{ messageId: "msg-2", snippet: "still flaky on CI", highlights: [{ start: 6, end: 11 }] },
-			],
-		});
+	// Main's find in chat (useChatFind) searches the whole history; a result
+	// opens it on the matched word, anchored at the opened message, so
+	// Enter/Shift+Enter step through that word's other occurrences.
+	it("opens find in chat on the matched word, anchored at the opened message", async () => {
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "flaky", query: "flaky" });
+		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "flaky", find: true });
 		render(
 			<Wrapper client={client}>
 				<SessionChatSurface session={session} />
 			</Wrapper>,
 		);
-
-		// Prefilled with the search, and positioned on the match that was opened.
-		const input = await screen.findByRole("searchbox", { name: "Find in conversation" });
-		expect(input).toHaveValue("flaky");
-		expect(input).toHaveFocus();
-		await waitFor(() => expect(screen.getByTestId("session-find-count")).toHaveTextContent("1/2"));
+		await waitFor(() => expect(screen.getByTestId("find-request")).toHaveTextContent("flaky@msg-1"));
 		expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-1");
-
-		// Enter goes to the next match and marks the matched word there.
-		fireEvent.keyDown(input, { key: "Enter" });
-		expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-2");
-		expect(screen.getByTestId("annotation-text")).toHaveTextContent("flaky");
-		expect(screen.getByTestId("session-find-count")).toHaveTextContent("2/2");
-		// Shift+Enter goes back; the end wraps around.
-		fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
-		expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-1");
-		fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
-		expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-2");
-
-		// Escape closes the bar.
-		fireEvent.keyDown(input, { key: "Escape" });
-		expect(screen.queryByTestId("session-find-bar")).not.toBeInTheDocument();
 	});
 
-	// Found in review: a second result for the same search emptied the bar's
-	// matches, and nothing refilled them: the query and its cached results were
-	// unchanged. The bar sat at 0/0 and Enter did nothing.
-	it("keeps the session's matches when another result for the same search opens", async () => {
-		mockMatches({
-			flaky: [
-				{ messageId: "msg-1", snippet: "the flaky login test", highlights: [{ start: 4, end: 9 }] },
-				{ messageId: "msg-2", snippet: "still flaky on CI", highlights: [{ start: 6, end: 11 }] },
-			],
-		});
+	it("sends a new find request for every result, even with the same word", async () => {
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "flaky", query: "flaky" });
+		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "flaky", find: true });
 		render(
 			<Wrapper client={client}>
 				<SessionChatSurface session={session} />
 			</Wrapper>,
 		);
-		const input = await screen.findByRole("searchbox", { name: "Find in conversation" });
-		await waitFor(() => expect(screen.getByTestId("session-find-count")).toHaveTextContent("1/2"));
+		await waitFor(() => expect(screen.getByTestId("find-request")).toHaveTextContent("flaky@msg-1"));
+		const first = screen.getByTestId("find-request").dataset.requestId;
 
-		act(() => requestSessionSearchReveal("sess-1", { messageId: "msg-2", text: "flaky", query: "flaky" }));
-		await waitFor(() => expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-2"));
-		// Positioned on the opened match, and Enter still steps (wrapping to the first).
-		expect(screen.getByTestId("session-find-count")).toHaveTextContent("2/2");
-		fireEvent.keyDown(input, { key: "Enter" });
-		expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-1");
-		expect(screen.getByTestId("session-find-count")).toHaveTextContent("1/2");
+		act(() => requestSessionSearchReveal("sess-1", { messageId: "msg-2", text: "flaky", find: true }));
+		await waitFor(() => expect(screen.getByTestId("find-request")).toHaveTextContent("flaky@msg-2"));
+		expect(screen.getByTestId("find-request").dataset.requestId).not.toBe(first);
 	});
 
-	it("searches again from the first match when the find query changes", async () => {
-		mockMatches({
-			flaky: [{ messageId: "msg-1", snippet: "the flaky login test", highlights: [{ start: 4, end: 9 }] }],
-			timeout: [
-				{ messageId: "msg-3", snippet: "a timeout here", highlights: [{ start: 2, end: 9 }] },
-				{ messageId: "msg-4", snippet: "timeout again", highlights: [{ start: 0, end: 7 }] },
-			],
-		});
+	// Find in chat searches user and assistant text only; a word matched in a
+	// command's output would open it on "No results".
+	it("opens no find for a match outside the message's words", async () => {
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "flaky", query: "flaky" });
-		render(
-			<Wrapper client={client}>
-				<SessionChatSurface session={session} />
-			</Wrapper>,
-		);
-		const input = await screen.findByRole("searchbox", { name: "Find in conversation" });
-		await waitFor(() => expect(screen.getByTestId("session-find-count")).toHaveTextContent("1/1"));
-
-		fireEvent.change(input, { target: { value: "timeout" } });
-		await waitFor(() => expect(screen.getByTestId("session-find-count")).toHaveTextContent("1/2"));
-		expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-3");
-		expect(screen.getByTestId("annotation-text")).toHaveTextContent("timeout");
-	});
-
-	it("opens no find bar for a result without a search", async () => {
-		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "flaky" });
+		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "ECONNRESET" });
 		render(
 			<Wrapper client={client}>
 				<SessionChatSurface session={session} />
 			</Wrapper>,
 		);
 		await waitFor(() => expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-1"));
-		expect(screen.queryByTestId("session-find-bar")).not.toBeInTheDocument();
+		expect(screen.getByTestId("find-request")).toBeEmptyDOMElement();
+	});
+
+	it("opens no find for a match without text", async () => {
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "  ", find: true });
+		render(
+			<Wrapper client={client}>
+				<SessionChatSurface session={session} />
+			</Wrapper>,
+		);
+		await waitFor(() => expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-1"));
+		expect(screen.getByTestId("find-request")).toBeEmptyDOMElement();
 	});
 });
 

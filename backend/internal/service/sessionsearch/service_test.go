@@ -886,30 +886,6 @@ func TestFailedBackfillReportsUnavailableUntilARetrySucceeds(t *testing.T) {
 	}
 }
 
-func TestMatchesForSessionListsEveryMatchInOrder(t *testing.T) {
-	f := newFixture(t, sessionsearch.TranscriptRoots{})
-	session := seedChatSession(t, f.store, "proj", "sess-1", "conv-1")
-	appendUserMessage(t, f.store, session, "conv-1", "msg-1", "turn-1", "first retry mention")
-	settleAssistantMessage(t, f.store, "conv-1", "msg-1-assistant", "turn-1", "second retry mention")
-	appendUserMessage(t, f.store, session, "conv-1", "msg-2", "turn-2", "third retry mention")
-	if _, err := f.svc.IndexChat(context.Background(), conversationFor(t, f.store, string(session.ID))); err != nil {
-		t.Fatalf("IndexChat: %v", err)
-	}
-	parsed := domain.ParseSessionSearchQuery("retry")
-	matches, err := f.svc.MatchesForSession(context.Background(), string(session.ID), parsed.MatchQuery, parsed.HighlightTerms)
-	if err != nil {
-		t.Fatalf("MatchesForSession: %v", err)
-	}
-	if len(matches) != 3 {
-		t.Fatalf("matches = %d, want 3", len(matches))
-	}
-	for index := 1; index < len(matches); index++ {
-		if matches[index].Seq < matches[index-1].Seq {
-			t.Fatalf("matches are not ordered by position: %+v", matches)
-		}
-	}
-}
-
 // The ranking stage scores at most 2,000 candidates by raw bm25. Two promises
 // keep that invisible: the total stays exact (it is recounted when the cap is
 // reached), and a filter turns the cap off, because a filter could otherwise
@@ -1009,11 +985,6 @@ func TestSearchFindsReviewerChatsAndOpensThemWhileOpenable(t *testing.T) {
 	if len(worker.Results) != 1 || worker.Results[0].ReviewID != "" || worker.Results[0].MessageID != "worker-msg" {
 		t.Fatalf("worker hit = %+v, want the session's own message with no review", worker.Results)
 	}
-	// Stepping walks the session's own transcript, which does not hold the
-	// reviewer's messages.
-	if matches, err := f.svc.MatchesForSession(ctx, string(session.ID), domain.ParseSessionSearchQuery("quokka").MatchQuery, nil); err != nil || len(matches) != 0 {
-		t.Fatalf("in-session matches = %+v err=%v, want none from the reviewer chat", matches, err)
-	}
 	// Two sources for one session must not rewrite each other on every pass.
 	if written, err := f.svc.Sweep(ctx); err != nil || written != 0 {
 		t.Fatalf("sweep after backfill wrote %d (err %v), want 0", written, err)
@@ -1075,21 +1046,6 @@ func TestGroupedRowShowsTheBestMessageAndCountsMessages(t *testing.T) {
 	// named-user and the reply; the failing command is shown with named-user.
 	if top.SessionMatches != 2 || got.Results[1].SessionMatches != 1 {
 		t.Fatalf("match counts = %d and %d, want 2 and 1", top.SessionMatches, got.Results[1].SessionMatches)
-	}
-	// The find bar steps through exactly the messages the row counted.
-	matches, err := f.svc.MatchesForSession(context.Background(), string(named.ID), domain.ParseSessionSearchQuery("flaky login").MatchQuery, domain.ParseSessionSearchQuery("flaky login").HighlightTerms)
-	if err != nil {
-		t.Fatalf("MatchesForSession: %v", err)
-	}
-	stops := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if match.MessageID != "" {
-			stops = append(stops, match.MessageID)
-		}
-	}
-	// settleAssistantMessage stores the reply as "assistant-" + its id.
-	if strings.Join(stops, ",") != "named-user,assistant-named-reply" {
-		t.Fatalf("find bar stops = %v, want each matched message once, in order", stops)
 	}
 }
 

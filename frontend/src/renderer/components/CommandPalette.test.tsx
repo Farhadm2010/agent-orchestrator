@@ -1518,12 +1518,12 @@ describe("CommandPalette session-text search", () => {
 		// Opening is not enough: the palette must hand the matched message to the
 		// session, or the Chat timeline has nothing to scroll to and the row would
 		// behave like a plain session jump.
-		// The matched word (marked in the opened message) and the query (which
-		// the opened session's find bar starts with).
+		// The matched word: the opened message marks it, and the session opens
+		// find in chat on it.
 		expect(peekSessionSearchReveal("w-fix")).toEqual({
 			messageId: "msg-1",
 			text: "flaky",
-			query: "flaky",
+			find: true,
 		});
 		await waitFor(() => expect(useUiStore.getState().isCommandPaletteOpen).toBe(false));
 	});

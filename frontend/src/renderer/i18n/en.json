@@ -4350,7 +4350,5 @@
 	"command.sessionMatches_one": "{{count}} match",
 	"command.sessionMatches_other": "{{count}} matches",
 	"search.matchCount_one": "{{count}} match",
-	"search.matchCount_other": "{{count}} matches",
-	"chat.findLabel": "Find in conversation",
-	"chat.findPlaceholder": "Find in conversation…"
+	"search.matchCount_other": "{{count}} matches"
 }

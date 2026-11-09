@@ -20,14 +20,12 @@ import (
 // stubSessionSearch records the parsed query and returns a fixed page, so the
 // controller test asserts the wire contract rather than index behavior.
 type stubSessionSearch struct {
-	parsed    domain.SessionSearchParsedQuery
-	params    domain.SessionSearchParams
-	calls     int
-	matches   []domain.SessionSearchResult
-	matchArgs [2]string
-	response  domain.SessionSearchResponse
-	coverage  domain.SessionSearchCoverage
-	err       error
+	parsed   domain.SessionSearchParsedQuery
+	params   domain.SessionSearchParams
+	calls    int
+	response domain.SessionSearchResponse
+	coverage domain.SessionSearchCoverage
+	err      error
 }
 
 func (s *stubSessionSearch) Search(_ context.Context, parsed domain.SessionSearchParsedQuery, params domain.SessionSearchParams) (domain.SessionSearchResponse, error) {
@@ -39,11 +37,6 @@ func (s *stubSessionSearch) Search(_ context.Context, parsed domain.SessionSearc
 
 func (s *stubSessionSearch) CorrectQuery(_ context.Context, parsed domain.SessionSearchParsedQuery) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error) {
 	return parsed, nil, nil
-}
-
-func (s *stubSessionSearch) MatchesForSession(_ context.Context, sessionID, matchQuery string, _ []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchResult, error) {
-	s.matchArgs = [2]string{sessionID, matchQuery}
-	return s.matches, s.err
 }
 
 func (s *stubSessionSearch) Coverage(context.Context) (domain.SessionSearchCoverage, error) {
@@ -269,58 +262,6 @@ func TestSearchSessionsAnswersNotImplementedWithoutService(t *testing.T) {
 	res, body := getSearch(t, srv, url.Values{"q": {"reaper"}})
 	if res.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501 (body %s)", res.StatusCode, body)
-	}
-}
-
-func TestSearchMatchesListsEveryMatchForASession(t *testing.T) {
-	svc := &stubSessionSearch{matches: []domain.SessionSearchResult{
-		{SessionID: "proj-1", Kind: domain.SessionSearchKindUser, MessageID: "msg-1", Seq: 1, Snippet: "retry"},
-		{SessionID: "proj-1", Kind: domain.SessionSearchKindAssistant, MessageID: "msg-2", Seq: 2, Snippet: "retry"},
-	}}
-	srv := newSessionSearchServer(t, svc)
-	res, err := http.Get(srv.URL + "/api/v1/sessions/proj-1/search/matches?q=retry")
-	if err != nil {
-		t.Fatalf("GET matches: %v", err)
-	}
-	defer func() { _ = res.Body.Close() }()
-	body, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
-	}
-	var payload struct {
-		Matches []struct {
-			MessageID string `json:"messageId"`
-			Seq       int64  `json:"seq"`
-		} `json:"matches"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("decode matches: %v", err)
-	}
-	if len(payload.Matches) != 2 {
-		t.Fatalf("matches = %d, want 2", len(payload.Matches))
-	}
-	if svc.matchArgs[0] != "proj-1" || svc.matchArgs[1] != `"retr"*` {
-		t.Fatalf("match args = %v", svc.matchArgs)
-	}
-}
-
-// A result opened from a pasted PR URL prefills the find bar with that URL,
-// which has no words; the matches are where the PR is mentioned.
-func TestSearchMatchesForAPastedPRURLUseThePRPhrase(t *testing.T) {
-	svc := &stubSessionSearch{}
-	srv := newSessionSearchServer(t, svc)
-	res, err := http.Get(srv.URL + "/api/v1/sessions/proj-1/search/matches?q=" +
-		url.QueryEscape("https://github.com/acme/widgets/pull/6553"))
-	if err != nil {
-		t.Fatalf("GET matches: %v", err)
-	}
-	defer func() { _ = res.Body.Close() }()
-	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(res.Body)
-		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
-	}
-	if svc.matchArgs[1] != `"pull 6553"` {
-		t.Fatalf("match query = %q, want the PR phrase", svc.matchArgs[1])
 	}
 }
 

@@ -18,7 +18,6 @@ import (
 // SessionSearchService is the controller-facing session search contract.
 type SessionSearchService interface {
 	Search(ctx context.Context, parsed domain.SessionSearchParsedQuery, params domain.SessionSearchParams) (domain.SessionSearchResponse, error)
-	MatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchResult, error)
 	CorrectQuery(ctx context.Context, parsed domain.SessionSearchParsedQuery) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error)
 	Coverage(ctx context.Context) (domain.SessionSearchCoverage, error)
 }
@@ -35,7 +34,6 @@ type SessionSearchController struct {
 func (c *SessionSearchController) Register(r chi.Router) {
 	r.Get("/search/sessions", c.search)
 	r.Get("/search/index-status", c.indexStatus)
-	r.Get("/sessions/{sessionId}/search/matches", c.matches)
 }
 
 func (c *SessionSearchController) search(w http.ResponseWriter, r *http.Request) {
@@ -54,43 +52,6 @@ func (c *SessionSearchController) search(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, sessionSearchResponse(result))
-}
-
-// matches lists every match for one session so Enter/Shift+Enter can step
-// through them after a result is opened. It is the in-session half of
-// "open at the matching message".
-func (c *SessionSearchController) matches(w http.ResponseWriter, r *http.Request) {
-	if c.Svc == nil {
-		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/search/matches")
-		return
-	}
-	sessionID := chi.URLParam(r, "sessionId")
-	parsed := domain.ParseSessionSearchQuery(r.URL.Query().Get("q"))
-	// The find bar steps through what the search found, so a misspelled word is
-	// corrected here the same way.
-	parsed, _, err := c.Svc.CorrectQuery(r.Context(), parsed)
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return
-	}
-	matchQuery, terms := parsed.MatchQuery, parsed.HighlightTerms
-	if matchQuery == "" && parsed.PRRef != nil {
-		// A result opened from a pasted PR URL steps through where the PR is
-		// mentioned, the same phrase the search ranked by.
-		matchQuery = parsed.PRRef.Phrase()
-		terms = domain.SessionSearchPhraseHighlightTerms(matchQuery)
-	}
-	if matchQuery == "" {
-		envelope.WriteError(w, r, apierr.Invalid("SESSION_SEARCH_QUERY_REQUIRED",
-			"Provide q with at least one word to find matches for", nil))
-		return
-	}
-	results, err := c.Svc.MatchesForSession(r.Context(), sessionID, matchQuery, terms)
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return
-	}
-	envelope.WriteJSON(w, http.StatusOK, SessionSearchMatchesResponse{Matches: sessionSearchResults(results)})
 }
 
 // indexStatus reports what the index covers, for `ao search --index-status` and
@@ -148,16 +109,6 @@ type SessionSearchResponse struct {
 type SessionSearchCorrection struct {
 	From string `json:"from" description:"The word as typed."`
 	To   string `json:"to" description:"The indexed word it was searched as."`
-}
-
-// SessionSearchMatchesQuery is the query for the in-session match list.
-type SessionSearchMatchesQuery struct {
-	Query string `query:"q" required:"true" description:"The same words or operators used for the search that opened the session."`
-}
-
-// SessionSearchMatchesResponse is the body of the in-session match list (200).
-type SessionSearchMatchesResponse struct {
-	Matches []SessionSearchResult `json:"matches"`
 }
 
 // SessionSearchIndexStatusResponse is the body of GET /api/v1/search/index-status.

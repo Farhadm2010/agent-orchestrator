@@ -4482,7 +4482,5 @@
 	"command.sessionMatches_many": "{{count}} coincidencias",
 	"search.matchCount_one": "{{count}} coincidencia",
 	"search.matchCount_other": "{{count}} coincidencias",
-	"search.matchCount_many": "{{count}} coincidencias",
-	"chat.findLabel": "Buscar en la conversación",
-	"chat.findPlaceholder": "Buscar en la conversación…"
+	"search.matchCount_many": "{{count}} coincidencias"
 }

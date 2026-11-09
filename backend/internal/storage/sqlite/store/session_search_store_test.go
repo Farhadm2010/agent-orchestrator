@@ -496,10 +496,6 @@ func TestSessionSearchStoresTextCompressedAndCutsSnippetsFromIt(t *testing.T) {
 	if !strings.Contains(hits[0].Snippet, marked) {
 		t.Fatalf("result snippet %q does not mark the match", hits[0].Snippet)
 	}
-	matches, err := s.SessionSearchMatchesForSession(ctx, "c", parsed.MatchQuery, parsed.HighlightTerms)
-	if err != nil || len(matches) != 1 || !strings.Contains(matches[0].Snippet, marked) {
-		t.Fatalf("find bar matches = %+v (err %v), want one marked snippet", matches, err)
-	}
 }
 
 // Found while benchmarking the contentless index: removing rows by rowid

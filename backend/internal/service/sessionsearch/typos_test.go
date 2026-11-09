@@ -2,6 +2,7 @@ package sessionsearch_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -60,16 +61,21 @@ func TestAWordThatMatchesIsNotCorrected(t *testing.T) {
 	}
 }
 
-// The find bar of a session opened from a corrected search steps through the
-// corrected word, not the typo that matched nothing.
-func TestTheFindBarStepsThroughTheCorrectedWord(t *testing.T) {
+// A result from a corrected search marks the corrected word: the opened
+// session starts find in chat on the marked word, so it must not be the typo
+// that matched nothing.
+func TestACorrectedResultMarksTheCorrectedWord(t *testing.T) {
 	f, sessionID := typoFixture(t)
-	parsed, corrections, err := f.svc.CorrectQuery(context.Background(), domain.ParseSessionSearchQuery("migartions"))
-	if err != nil || len(corrections) != 1 {
-		t.Fatalf("CorrectQuery: corrections=%+v err=%v", corrections, err)
+	got := search(t, f.svc, "migartions")
+	if len(got.Corrections) != 1 || len(got.Results) == 0 || got.Results[0].SessionID != sessionID || got.Results[0].MessageID != "msg-1" {
+		t.Fatalf("corrections=%+v results=%+v, want msg-1 found through the correction", got.Corrections, got.Results)
 	}
-	matches, err := f.svc.MatchesForSession(context.Background(), sessionID, parsed.MatchQuery, parsed.HighlightTerms)
-	if err != nil || len(matches) != 1 || matches[0].MessageID != "msg-1" {
-		t.Fatalf("matches = %+v (err %v), want the message holding migrations", matches, err)
+	top := got.Results[0]
+	if len(top.Highlights) == 0 {
+		t.Fatalf("result %+v marks nothing", top)
+	}
+	marked := top.Snippet[top.Highlights[0].Start:top.Highlights[0].End]
+	if !strings.EqualFold(marked, "migrations") {
+		t.Fatalf("marked %q in %q, want the corrected word", marked, top.Snippet)
 	}
 }

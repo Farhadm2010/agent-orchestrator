@@ -122,7 +122,7 @@ export function SessionSearchView() {
 			messageId: result.messageId,
 			snippet: result.snippet,
 			highlights: result.highlights,
-			query: filters.query,
+			matchKind: result.kind,
 			reviewId: result.reviewId,
 		});
 		const target = sessionNavigateTarget(

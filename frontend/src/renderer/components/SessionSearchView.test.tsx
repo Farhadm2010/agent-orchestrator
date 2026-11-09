@@ -126,9 +126,8 @@ describe("SessionSearchView", () => {
 			messageId: "msg-1",
 			// The matched word, which the opened message highlights exactly.
 			text: "flaky",
-			// The query travels with the target: the opened session's find bar
-			// starts with it, so Enter / Shift+Enter step through the matches.
-			query: "flaky",
+			// A match in the user's words, so the session opens find in chat on it.
+			find: true,
 		});
 	});
 

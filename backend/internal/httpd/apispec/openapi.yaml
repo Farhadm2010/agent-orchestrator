@@ -11799,54 +11799,6 @@ paths:
         output exists)
       tags:
       - sessions
-  /api/v1/sessions/{sessionId}/search/matches:
-    get:
-      operationId: listSessionSearchMatches
-      parameters:
-      - description: Session identifier, e.g. project-1.
-        in: path
-        name: sessionId
-        required: true
-        schema:
-          description: Session identifier, e.g. project-1.
-          type: string
-      - description: The same words or operators used for the search that opened the
-          session.
-        in: query
-        name: q
-        required: true
-        schema:
-          description: The same words or operators used for the search that opened
-            the session.
-          type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionSearchMatchesResponse'
-          description: OK
-        "400":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Bad Request
-        "500":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Internal Server Error
-        "501":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Not Implemented
-      summary: List every indexed match for one session, in position order
-      tags:
-      - sessions
   /api/v1/sessions/{sessionId}/send:
     post:
       operationId: sendSessionMessage
@@ -21721,15 +21673,6 @@ components:
           $ref: '#/components/schemas/SessionSearchCoverage'
       required:
       - coverage
-      type: object
-    SessionSearchMatchesResponse:
-      properties:
-        matches:
-          items:
-            $ref: '#/components/schemas/SessionSearchResult'
-          type: array
-      required:
-      - matches
       type: object
     SessionSearchResponse:
       properties:

@@ -590,60 +590,6 @@ func (s *Store) BrowseSessionSearchDocs(ctx context.Context, params domain.Sessi
 	return hits, nil
 }
 
-// SessionSearchMatchesForSession lists every indexed match for one session and
-// one expression, ordered by position. Enter/Shift+Enter stepping uses it. The
-// index is contentless, so each snippet is cut from the stored text with the
-// query's highlight terms, the same way result pages are.
-func (s *Store) SessionSearchMatchesForSession(ctx context.Context, sessionID, matchQuery string, terms []domain.SessionSearchHighlightTerm) ([]domain.SessionSearchHit, error) {
-	if sessionID == "" || matchQuery == "" {
-		return nil, nil
-	}
-	rows, err := s.readDB.QueryContext(ctx, `
-SELECT d.session_id, d.project_id, d.harness, d.machine, d.kind, d.message_id, d.seq,
-       COALESCE(t.title, ''), d.created_at, m.rank, t.body
-FROM (
-    SELECT rowid AS id, bm25(session_search_fts, 8.0, 1.0, 4.0) AS rank
-    FROM session_search_fts
-    WHERE session_search_fts MATCH ?
-) m
-JOIN session_search_docs d ON d.id = m.id
-LEFT JOIN session_search_text t ON t.id = m.id
-WHERE d.session_id = ?
-  -- Stepping walks the session's own transcript; a reviewer chat's messages
-  -- are not in it and could not be scrolled to. The title is the session's
-  -- name, not a place in the transcript.
-  AND d.source_key NOT LIKE 'review:%'
-  AND d.kind <> 'title'
-ORDER BY d.seq, d.id`,
-		matchQuery, sessionID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list session search matches: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var hits []domain.SessionSearchHit
-	for rows.Next() {
-		var hit domain.SessionSearchHit
-		var createdAt int64
-		var kind string
-		var body []byte
-		if err := rows.Scan(
-			&hit.SessionID, &hit.ProjectID, &hit.Harness, &hit.Machine, &kind, &hit.MessageID, &hit.Seq,
-			&hit.Title, &createdAt, &hit.Rank, &body,
-		); err != nil {
-			return nil, fmt.Errorf("scan session search match: %w", err)
-		}
-		hit.Kind = domain.SessionSearchKind(kind)
-		hit.CreatedAt = time.UnixMilli(createdAt).UTC()
-		hit.Snippet = domain.SessionSearchSnippet(searchtext.Decode(body), terms)
-		hits = append(hits, hit)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate session search matches: %w", err)
-	}
-	return hits, nil
-}
-
 // SessionSearchMatchCounts counts, for each session, the places its find bar
 // steps through for a query: matches in the session's own transcript (not its
 // reviewer chat, not its title), with a message and the tool output shown

@@ -17,7 +17,6 @@ vi.mock("../lib/api-client", async (importOriginal) => ({
 import {
 	usePaletteSessionSearch,
 	useSessionSearchIndexStatus,
-	useSessionSearchMatches,
 } from "./usePaletteSessionSearch";
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -80,36 +79,5 @@ describe("useSessionSearchIndexStatus", () => {
 		await waitFor(() => expect(result.current.isFetching).toBe(false));
 		expect(result.current.isError).toBe(false);
 		expect(result.current.data).toBeNull();
-	});
-});
-
-describe("useSessionSearchMatches", () => {
-	beforeEach(() => {
-		getMock.mockReset();
-	});
-
-	it("lists the matches for one session so Enter can step through them", async () => {
-		getMock.mockResolvedValue({
-			data: {
-				matches: [
-					{ sessionId: "proj-1", projectId: "proj", kind: "user", messageId: "msg-1", seq: 1, snippet: "retry" },
-					{ sessionId: "proj-1", projectId: "proj", kind: "assistant", messageId: "msg-2", seq: 2, snippet: "retry" },
-				],
-			},
-		});
-		const { result } = renderHook(() => useSessionSearchMatches("proj-1", "retry"), { wrapper });
-		await waitFor(() => expect(result.current.isSuccess).toBe(true));
-		expect(result.current.data).toHaveLength(2);
-		expect(getMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/search/matches", {
-			params: { path: { sessionId: "proj-1" }, query: { q: "retry" } },
-		});
-	});
-
-	it("stays idle with no session or no query", () => {
-		const { result } = renderHook(() => useSessionSearchMatches(undefined, "retry"), { wrapper });
-		expect(result.current.fetchStatus).toBe("idle");
-		const empty = renderHook(() => useSessionSearchMatches("proj-1", "  "), { wrapper });
-		expect(empty.result.current.fetchStatus).toBe("idle");
-		expect(getMock).not.toHaveBeenCalled();
 	});
 });
