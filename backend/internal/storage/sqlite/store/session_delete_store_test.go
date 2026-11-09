@@ -509,6 +509,7 @@ WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND c.name IN ('session_id
   -- sweep removes their documents from search.db; asserted below.
   AND m.name <> 'session_search_deleted'`)
 		mustNoError(t, err)
+		defer func() { _ = rows.Close() }()
 		type column struct{ table, name string }
 		var columns []column
 		for rows.Next() {
@@ -516,7 +517,7 @@ WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND c.name IN ('session_id
 			mustNoError(t, rows.Scan(&col.table, &col.name))
 			columns = append(columns, col)
 		}
-		mustNoError(t, rows.Close())
+		mustNoError(t, rows.Err())
 		out := map[string]int{}
 		for _, col := range columns {
 			value := string(id)

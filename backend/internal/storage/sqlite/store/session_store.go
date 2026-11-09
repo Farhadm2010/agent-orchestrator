@@ -1074,7 +1074,7 @@ ON CONFLICT (id_prefix) DO UPDATE SET max_num = MAX(max_num, excluded.max_num)`,
 		return false, fmt.Errorf("delete session %s: record number floor: %w", id, err)
 	}
 	// Usage events that arrived after drainSessionUsage.
-	if _, err := foldSessionAccountUsage(ctx, tx, id, -1); err != nil {
+	if err := foldSessionAccountUsage(ctx, tx, id, -1); err != nil {
 		return false, fmt.Errorf("delete session %s: keep account usage: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1219,7 +1219,7 @@ func (s *Store) deleteSessionUsageBatch(ctx context.Context, id domain.SessionID
 	).Scan(&terminated); err != nil || !terminated {
 		return 0, err
 	}
-	if _, err := foldSessionAccountUsage(ctx, tx, id, batch); err != nil {
+	if err := foldSessionAccountUsage(ctx, tx, id, batch); err != nil {
 		return 0, err
 	}
 	res, err := tx.ExecContext(ctx, deleteSessionUsageBatchSQL, id, batch)

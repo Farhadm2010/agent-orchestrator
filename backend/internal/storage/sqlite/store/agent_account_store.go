@@ -206,34 +206,38 @@ DELETE FROM model_usage_events WHERE id IN (
 // foldSessionAccountUsage adds the account usage of session id's first limit
 // usage events (-1 for all) to the deleted-session totals, which keep a
 // deleted session's spend in the agent account usage view. The caller deletes
-// those events in the same transaction. It reports how many usage rows it
-// added to.
-func foldSessionAccountUsage(ctx context.Context, tx *sql.Tx, id domain.SessionID, limit int) (int, error) {
+// those events in the same transaction.
+func foldSessionAccountUsage(ctx context.Context, tx *sql.Tx, id domain.SessionID, limit int) error {
+	usage, err := sessionAccountUsageBatch(ctx, tx, id, limit)
+	if err != nil {
+		return err
+	}
+	q := gen.New(tx)
+	for _, row := range usage {
+		if err := q.AddDeletedSessionAccountUsage(ctx, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sessionAccountUsageBatch reads what foldSessionAccountUsage adds. The rows
+// are read to the end and closed before the fold writes on the same
+// transaction.
+func sessionAccountUsageBatch(ctx context.Context, tx *sql.Tx, id domain.SessionID, limit int) ([]gen.AddDeletedSessionAccountUsageParams, error) {
 	rows, err := tx.QueryContext(ctx, sessionAccountUsageBatchSQL, string(id), limit, sql.NullTime{Time: time.Time{}, Valid: true})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	var usage []gen.AddDeletedSessionAccountUsageParams
 	for rows.Next() {
 		var row gen.AddDeletedSessionAccountUsageParams
 		if err := rows.Scan(&row.AccountID, &row.Day, &row.ModelID, &row.InputTokens,
 			&row.CachedInputTokens, &row.OutputTokens, &row.EstimatedCostNanos); err != nil {
-			_ = rows.Close()
-			return 0, err
+			return nil, err
 		}
 		usage = append(usage, row)
 	}
-	if err := rows.Close(); err != nil {
-		return 0, err
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	q := gen.New(tx)
-	for _, row := range usage {
-		if err := q.AddDeletedSessionAccountUsage(ctx, row); err != nil {
-			return 0, err
-		}
-	}
-	return len(usage), nil
+	return usage, rows.Err()
 }

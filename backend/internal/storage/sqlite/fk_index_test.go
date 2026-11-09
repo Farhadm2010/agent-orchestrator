@@ -27,69 +27,38 @@ func TestEveryForeignKeyHasAnIndexOnItsChildColumns(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	indexed := map[string]bool{}
-	leading, err := db.Query(`
+	for _, pair := range queryPairs(t, db, `
 SELECT m.name, ii.name
 FROM sqlite_master m
 JOIN pragma_index_list(m.name) il
 JOIN pragma_index_info(il.name) ii
-WHERE m.type = 'table' AND ii.seqno = 0`)
-	if err != nil {
-		t.Fatalf("list indexes: %v", err)
+WHERE m.type = 'table' AND ii.seqno = 0 AND ii.name IS NOT NULL`) {
+		indexed[pair[0]+"."+pair[1]] = true
 	}
-	for leading.Next() {
-		var table string
-		var column sql.NullString // NULL for an index on an expression
-		if err := leading.Scan(&table, &column); err != nil {
-			t.Fatalf("scan index: %v", err)
-		}
-		if column.Valid {
-			indexed[table+"."+column.String] = true
-		}
-	}
-	_ = leading.Close()
 	// An INTEGER PRIMARY KEY is the rowid, which is its own index.
-	rowids, err := db.Query(`
+	for _, pair := range queryPairs(t, db, `
 SELECT m.name, c.name
 FROM sqlite_master m
 JOIN pragma_table_info(m.name) c
 WHERE m.type = 'table' AND c.pk = 1 AND upper(c.type) = 'INTEGER'
-  AND (SELECT count(*) FROM pragma_table_info(m.name) WHERE pk > 0) = 1`)
-	if err != nil {
-		t.Fatalf("list rowid keys: %v", err)
+  AND (SELECT count(*) FROM pragma_table_info(m.name) WHERE pk > 0) = 1`) {
+		indexed[pair[0]+"."+pair[1]] = true
 	}
-	for rowids.Next() {
-		var table, column string
-		if err := rowids.Scan(&table, &column); err != nil {
-			t.Fatalf("scan rowid key: %v", err)
-		}
-		indexed[table+"."+column] = true
-	}
-	_ = rowids.Close()
-
-	keys, err := db.Query(`
-SELECT m.name, p."from", p."table"
-FROM sqlite_master m
-JOIN pragma_foreign_key_list(m.name) p
-WHERE m.type = 'table'
-ORDER BY m.name, p."from"`)
-	if err != nil {
-		t.Fatalf("list foreign keys: %v", err)
-	}
-	defer func() { _ = keys.Close() }()
 	// Deliberately unindexed; see 20261109103000000_session_delete_fk_indexes.sql.
 	unindexed := map[string]bool{
 		"conversation_turns.handled_by_session_id": true,
 	}
 	var missing []string
 	checked := 0
-	for keys.Next() {
-		var child, column, parent string
-		if err := keys.Scan(&child, &column, &parent); err != nil {
-			t.Fatalf("scan foreign key: %v", err)
-		}
+	for _, pair := range queryPairs(t, db, `
+SELECT m.name || '.' || p."from", p."table"
+FROM sqlite_master m
+JOIN pragma_foreign_key_list(m.name) p
+WHERE m.type = 'table'
+ORDER BY m.name, p."from"`) {
 		checked++
-		if !indexed[child+"."+column] && !unindexed[child+"."+column] {
-			missing = append(missing, child+"."+column+" -> "+parent)
+		if !indexed[pair[0]] && !unindexed[pair[0]] {
+			missing = append(missing, pair[0]+" -> "+pair[1])
 		}
 	}
 	if checked == 0 {
@@ -99,4 +68,26 @@ ORDER BY m.name, p."from"`)
 		t.Fatalf("foreign keys without an index on the child column (each delete of the parent scans the child table):\n  %s",
 			strings.Join(missing, "\n  "))
 	}
+}
+
+// queryPairs runs a query of two text columns and returns its rows.
+func queryPairs(t *testing.T, db *sql.DB, query string) [][2]string {
+	t.Helper()
+	rows, err := db.Query(query)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out [][2]string
+	for rows.Next() {
+		var pair [2]string
+		if err := rows.Scan(&pair[0], &pair[1]); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, pair)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	return out
 }

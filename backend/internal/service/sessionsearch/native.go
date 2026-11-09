@@ -98,17 +98,6 @@ func nativeDocs(sourceKey string, target domain.SessionSearchTarget, machine str
 	return docs
 }
 
-// indexNativeSession indexes one session's provider transcript, if the harness
-// has one AO understands. It returns true when it wrote documents.
-//
-// The transcript is opened read-only and read forward from the stored byte
-// offset. A file whose identity or size went backwards was rewritten or
-// truncated, so the source restarts from zero instead of reading from a stale
-// offset.
-func (s *Service) indexNativeSession(ctx context.Context, target domain.SessionSearchTarget) bool {
-	return s.applyNativePlan(ctx, s.planNativeSession(ctx, target))
-}
-
 // nativeOutcome is what preparing a native source decided to do with it.
 type nativeOutcome int
 
@@ -143,6 +132,11 @@ type nativePlan struct {
 
 // planNativeSession reads a source's state and its transcript and builds its
 // documents. It only reads.
+//
+// A transcript is opened read-only and read forward from the stored byte
+// offset. A file whose identity or size went backwards was rewritten or
+// truncated, so the source restarts from zero instead of reading from a stale
+// offset.
 func (s *Service) planNativeSession(ctx context.Context, target domain.SessionSearchTarget) nativePlan {
 	plan := nativePlan{target: target, sourceKey: NativeSourceKey(target.Harness, string(target.ID))}
 	// OpenCode keeps its history in its own database rather than a transcript,
