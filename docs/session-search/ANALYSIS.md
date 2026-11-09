@@ -1623,7 +1623,7 @@ found 46% to 5%.
 **Long messages are split, not cut.** A message past 8 KiB becomes up to 8
 chunks (64 KiB) with one message id, so a later chunk opens the message, and the
 row's match count strips the `#n` chunk suffix so a word in several chunks is
-one match.
+one match. (Since §8.17 each chunk also repeats the end of the one before it.)
 
 **Typos are repaired from the index vocabulary** (`sessionsearch/typos.go`,
 an `fts5vocab` table). A word that matches nothing as typed, by its stem or as
@@ -1882,3 +1882,41 @@ then opens again with the same word at another message; `SessionChatSurface`
 sends one find request per result and none for a match outside a message's
 words or without text; `session-search-reveal` sets `find` only for user and
 assistant matches.
+
+### 8.17 A quoted phrase across a chunk break (10 Nov 2026)
+
+Found in review. A long message's chunks (§8.12) shared no text, and each
+chunk is its own FTS document. A quoted phrase has to sit inside one document,
+so a phrase with a chunk break between its words was in neither chunk:
+`strings.Repeat("x ", 4092) + "alpha beta"` breaks after `alpha `, and
+`"alpha beta"` found nothing. Plain words were not affected (they are OR'd and
+ranked, not required to be adjacent).
+
+- **The fix.** Each chunk after the first now starts with the last 256 bytes
+  of the one before it (`chunkOverlapBytes`), moved back to the start of a
+  word, so a phrase across a break is whole in the later chunk. The breaks
+  themselves are where they were, so a long message keeps the same text as
+  before; a later chunk is up to 320 bytes longer than 8 KiB.
+- **Both sources.** AO Chat messages and native transcript messages go through
+  the same `textChunks`. Tool rows are one document and are not chunked.
+- **Existing indexes are rebuilt once.** `indexFormatVersion` is 6 and
+  `nativeFormat` is `native-v5`, so the next sweep reads every source again.
+- **The limit.** A phrase is found when the part of it before the break fits
+  in the overlap. A quoted phrase with more than about 256 bytes on the early
+  side of a break is still missed.
+- **A side effect.** A word within the overlap is in two chunks of one
+  message. The row's match count already treats a message's chunks as one
+  match. `ao search --per-message` lists matching documents, so it can show
+  that message twice, as it already did for a word that appears in two chunks.
+
+The benchmark indexes through the same code and is unchanged: LongMemEval-S
+R@1 88.3, LoCoMo 62.6, agentic 93.0 (`scripts/search-benchmark.sh full`, gate
+passes).
+
+Tests: `chunks_test.go` (the breaks do not move, the carried text is the end
+of the previous chunk and starts at a word, unbroken multi-byte text stays
+valid UTF-8, the review's case holds the phrase in its second chunk);
+`TestChatQuotedPhraseAcrossAChunkBreakIsFound` and
+`TestNativeQuotedPhraseAcrossAChunkBreakIsFound` search the quoted phrase and
+check the word in both chunks is still one match. All three fail with the
+overlap set to 0.

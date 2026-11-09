@@ -44,6 +44,15 @@ const (
 	// prompt stays searchable to its end; the bound keeps one pasted log from
 	// turning into hundreds of documents.
 	maxMessageChunks = 8
+	// chunkOverlapBytes is how much of a chunk's end the next chunk repeats,
+	// on top of its own maxDocBodyBytes. Each chunk is its own document and a
+	// quoted phrase must sit inside one, so without the repeat a phrase across
+	// a cut is in neither. A phrase is found when the part of it before the
+	// cut fits in the overlap.
+	chunkOverlapBytes = 256
+	// chunkOverlapWordBytes is how far back the overlap may reach to start at
+	// the beginning of a word instead of inside one.
+	chunkOverlapWordBytes = 64
 	// maxTitleBytes caps a title document.
 	maxTitleBytes = 512
 	// maxIdentifierSplits bounds how many identifiers per document are expanded
@@ -707,7 +716,7 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 		}
 		// A long message is several documents with one message id, so it is
 		// still one place to open and one match in the row's count.
-		for index, chunk := range textChunks(message.Text, maxDocBodyBytes, maxMessageChunks) {
+		for index, chunk := range textChunks(message.Text, maxDocBodyBytes, chunkOverlapBytes, maxMessageChunks) {
 			body := domain.SessionSearchSplitIdentifiers(chunk, maxIdentifierSplits)
 			if strings.TrimSpace(body) == "" {
 				continue
@@ -946,7 +955,9 @@ func stampFingerprint(stamp domain.SessionSearchConversationStamp) string {
 //	   indexed as their text values rather than raw JSON.
 //	5: Orca's coverage (coverage.go): a tool row is its name, one argument
 //	   and the first 3,072 characters of output; reasoning is not indexed.
-const indexFormatVersion = 5
+//	6: a long message's chunks overlap, so a quoted phrase across a chunk
+//	   boundary is found.
+const indexFormatVersion = 6
 
 // stampValue renders the stamp a pass compared, or the empty string when the
 // pass had none (a backfill, which reads everything anyway).
@@ -1332,28 +1343,57 @@ func searchableText(value string) string {
 	return domain.SessionSearchSplitIdentifiers(trimmed, maxIdentifierSplits)
 }
 
-// textChunks splits a text into pieces of at most limit bytes, breaking at a
-// line or space near the limit when there is one, and keeps at most maxChunks
-// pieces.
-func textChunks(value string, limit, maxChunks int) []string {
+// textChunks splits a text into at most maxChunks pieces of at most limit
+// bytes, breaking at a line or space near the limit when there is one. Each
+// piece after the first is returned with the last overlap bytes of the one
+// before it in front (chunkOverlapStart), so a phrase across a break is whole
+// in the later piece. The breaks themselves do not depend on the overlap.
+func textChunks(value string, limit, overlap, maxChunks int) []string {
 	if len(value) <= limit {
 		return []string{value}
 	}
 	chunks := make([]string, 0, min(maxChunks, len(value)/limit+1))
-	for value != "" && len(chunks) < maxChunks {
-		if len(value) <= limit {
-			chunks = append(chunks, value)
+	start := 0
+	for start < len(value) && len(chunks) < maxChunks {
+		piece := value[start:]
+		if len(piece) > limit {
+			piece = truncateBytes(piece, limit)
+			// Prefer a break in the last eighth of the piece, so a word is not cut.
+			if cut := strings.LastIndexAny(piece, "\n "); cut > limit-limit/8 {
+				piece = piece[:cut+1]
+			}
+		}
+		if piece == "" {
 			break
 		}
-		piece := truncateBytes(value, limit)
-		// Prefer a break in the last eighth of the piece, so a word is not cut.
-		if cut := strings.LastIndexAny(piece, "\n "); cut > limit-limit/8 {
-			piece = piece[:cut+1]
-		}
-		chunks = append(chunks, piece)
-		value = value[len(piece):]
+		end := start + len(piece)
+		chunks = append(chunks, value[chunkOverlapStart(value, start, overlap):end])
+		start = end
 	}
 	return chunks
+}
+
+// chunkOverlapStart returns where the chunk whose own text starts at at
+// begins once it carries the overlap: overlap bytes earlier, moved back to
+// the start of the word there so the overlap holds whole words. A word longer
+// than chunkOverlapWordBytes (a hash, a URL) is entered at a character
+// boundary instead.
+func chunkOverlapStart(value string, at, overlap int) int {
+	if overlap <= 0 || at <= 0 {
+		return at
+	}
+	start := at - overlap
+	if start <= 0 {
+		return 0
+	}
+	floor := max(start-chunkOverlapWordBytes, 0)
+	if cut := strings.LastIndexAny(value[floor:start], "\n "); cut >= 0 {
+		return floor + cut + 1
+	}
+	for start < at && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return start
 }
 
 // chunkDocKey names a message's chunk: the first keeps the message's own key,

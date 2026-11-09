@@ -93,6 +93,62 @@ func TestChatLongMessageToItsEndAndLongOutputToItsStart(t *testing.T) {
 	}
 }
 
+// Found in review: a long message's chunks shared no text, so a quoted phrase
+// with a chunk break between its words was in neither chunk and found nothing.
+// The fixture is the one from the review: the break falls after "alpha ".
+// Each chunk now starts with the end of the one before it.
+const phraseAcrossABreak = "alpha beta"
+
+func textWithAPhraseAcrossABreak() string {
+	return strings.Repeat("x ", 4092) + phraseAcrossABreak
+}
+
+func TestChatQuotedPhraseAcrossAChunkBreakIsFound(t *testing.T) {
+	f := newFixture(t, sessionsearch.TranscriptRoots{})
+	session := seedChatSession(t, f.store, "proj", "sess-chat-phrase", "conv-chat-phrase")
+	appendUserMessage(t, f.store, session, "conv-chat-phrase", "msg-phrase", "turn-phrase", textWithAPhraseAcrossABreak())
+	if _, err := f.svc.IndexAll(context.Background()); err != nil {
+		t.Fatalf("IndexAll: %v", err)
+	}
+	got := search(t, f.svc, `"`+phraseAcrossABreak+`"`).Results
+	if len(got) != 1 || got[0].MessageID != "msg-phrase" {
+		t.Fatalf("results = %s, want the message holding the phrase", describe(got))
+	}
+	if !strings.Contains(got[0].Snippet, phraseAcrossABreak) {
+		t.Fatalf("snippet %q does not show the phrase", got[0].Snippet)
+	}
+	// "alpha" is now in both chunks; it is still one message, one match.
+	word := search(t, f.svc, "alpha").Results
+	if len(word) != 1 || word[0].SessionMatches != 1 {
+		t.Fatalf("results = %s (matches %v), want one session with one match", describe(word), matchCounts(word))
+	}
+	// Words that are not next to each other are not a phrase.
+	if miss := search(t, f.svc, `"beta alpha"`).Results; len(miss) != 0 {
+		t.Fatalf("results = %s, want none for the words in the other order", describe(miss))
+	}
+}
+
+func TestNativeQuotedPhraseAcrossAChunkBreakIsFound(t *testing.T) {
+	root := t.TempDir()
+	f := newFixture(t, sessionsearch.TranscriptRoots{ClaudeProjects: root})
+	seedTUIProject(t, f.store, "proj")
+	session := seedTUI(t, f.store, "proj", "sess-native-phrase", domain.HarnessClaudeCode)
+	writeTranscript(t, root, filepath.Join("-tmp-proj", string(session.ID)+".jsonl"),
+		claudeLine(t, "user", "user", textWithAPhraseAcrossABreak(), "2026-08-09T12:00:00Z"),
+	)
+	if _, err := f.svc.IndexAll(context.Background()); err != nil {
+		t.Fatalf("IndexAll: %v", err)
+	}
+	got := search(t, f.svc, `"`+phraseAcrossABreak+`"`).Results
+	if len(got) != 1 || got[0].SessionID != string(session.ID) {
+		t.Fatalf("results = %s, want the session holding the phrase", describe(got))
+	}
+	word := search(t, f.svc, "alpha").Results
+	if len(word) != 1 || word[0].SessionMatches != 1 {
+		t.Fatalf("results = %s (matches %v), want one session with one match", describe(word), matchCounts(word))
+	}
+}
+
 func matchCounts(results []domain.SessionSearchResult) []int {
 	out := make([]int, len(results))
 	for index, result := range results {

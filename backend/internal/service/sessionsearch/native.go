@@ -52,7 +52,9 @@ type nativeLine struct {
 //	4: Orca's coverage (coverage.go): a tool call is its name and one
 //	   argument, a tool result its first 3,072 characters; reasoning and edit
 //	   contents are not indexed.
-const nativeFormat = "native-v4"
+//	5: a long message's chunks overlap, so a quoted phrase across a chunk
+//	   boundary is found.
+const nativeFormat = "native-v5"
 
 // nativeDocs turns one parsed unit into its documents. A tool row is already
 // within its caps (coverage.go) and stays one document; a long message is
@@ -63,7 +65,7 @@ func nativeDocs(sourceKey string, target domain.SessionSearchTarget, machine str
 	case domain.SessionSearchKindCommand, domain.SessionSearchKindTool, domain.SessionSearchKindPath:
 		chunks = []string{line.text}
 	default:
-		chunks = textChunks(line.text, maxDocBodyBytes, maxMessageChunks)
+		chunks = textChunks(line.text, maxDocBodyBytes, chunkOverlapBytes, maxMessageChunks)
 	}
 	paths := searchableText(strings.Join(line.paths, "\n"))
 	created := line.at
