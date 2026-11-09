@@ -48,11 +48,11 @@ describe("revealSessionSearchMatch", () => {
 	// view and reviewer chat consume. Keyed by id alone, an open local session
 	// with the same id took the target, and a remote reviewer chat never opened.
 	it("keys a remote match by host and id, so this machine's session with that id never takes it", () => {
-		revealSessionSearchMatch({ sessionId: "s1", hostId: "h_air", messageId: "m1", snippet: "the flaky test", query: "flaky" });
+		revealSessionSearchMatch({ sessionId: "s1", hostId: "h_air", messageId: "m1", snippet: "the flaky test", matchKind: "user" });
 		expect(peekSessionSearchReveal("s1")).toBeUndefined();
-		expect(peekSessionSearchReveal(sessionUiKey("s1", "h_air"))).toMatchObject({ messageId: "m1", query: "flaky" });
+		expect(peekSessionSearchReveal(sessionUiKey("s1", "h_air"))).toMatchObject({ messageId: "m1", find: true });
 
-		revealSessionSearchMatch({ sessionId: "s1", hostId: "h_air", messageId: "m9", snippet: "regression", query: "regression", reviewId: "r1" });
+		revealSessionSearchMatch({ sessionId: "s1", hostId: "h_air", messageId: "m9", snippet: "regression", reviewId: "r1" });
 		expect(useUiStore.getState().chatMessageFocusRequest).toMatchObject({ sessionId: sessionUiKey("s1", "h_air"), reviewId: "r1" });
 	});
 
