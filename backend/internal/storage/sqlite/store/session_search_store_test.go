@@ -697,6 +697,91 @@ func TestIndexedSessionsMissingFromTheDatabaseAreRecordedAsDeleted(t *testing.T)
 	}
 }
 
+// Found in review: the ranking stage kept the best 2,000 matches first and
+// dropped the documents of deleted sessions afterwards. More than 2,000 of
+// those, each matching better than a live document, took every place the cap
+// has: the first page came back empty although the count found the session,
+// and nothing fetched it later. They are left out before the cap now.
+func TestDocumentsOfDeletedSessionsDoNotFillTheCandidateCap(t *testing.T) {
+	ctx := context.Background()
+	s, conversation := sessionSearchFixture(t)
+	kept := string(conversation.SessionID)
+	// More than the cap (sessionSearchCandidateCap, 2,000), in a session the
+	// database does not have. One word each: a shorter document scores better
+	// than the kept ones below.
+	const pending, live, page = 2100, 30, 25
+	docs := make([]domain.SessionSearchDoc, 0, pending+live)
+	for index := 0; index < pending; index++ {
+		docs = append(docs, domain.SessionSearchDoc{
+			SourceKey: "chat:gone", DocKey: fmt.Sprintf("m%d", index), SessionID: "gone",
+			Kind: domain.SessionSearchKindUser, MessageID: fmt.Sprintf("gone-%d", index),
+			Body: "zzkept", CreatedAt: testNow, IndexedAt: testNow,
+		})
+	}
+	for index := 0; index < live; index++ {
+		docs = append(docs, domain.SessionSearchDoc{
+			SourceKey: "chat:" + kept, DocKey: fmt.Sprintf("m%d", index), SessionID: kept,
+			Kind: domain.SessionSearchKindUser, MessageID: fmt.Sprintf("kept-%d", index),
+			Body:      "zzkept with extra words that make this document longer than the deleted ones",
+			CreatedAt: testNow, IndexedAt: testNow,
+		})
+	}
+	for start := 0; start < len(docs); start += 250 {
+		if err := s.UpsertSessionSearchDocs(ctx, docs[start:min(start+250, len(docs))]); err != nil {
+			t.Fatalf("UpsertSessionSearchDocs: %v", err)
+		}
+	}
+	parsed := domain.ParseSessionSearchQuery("zzkept")
+	params := domain.SessionSearchParams{MatchQuery: parsed.MatchQuery, HighlightTerms: parsed.HighlightTerms}
+	perMessage := params
+	perMessage.Group, perMessage.Limit = domain.SessionSearchGroupMessage, page
+
+	// The fixture's point: while both sessions are results, the stronger
+	// documents are the whole first page, so they are what the cap would keep.
+	first, err := s.SearchSessionSearchDocs(ctx, perMessage)
+	if err != nil || len(first) != page {
+		t.Fatalf("before the delete: %d hits (err %v), want a full page", len(first), err)
+	}
+	for _, hit := range first {
+		if hit.SessionID != "gone" {
+			t.Fatalf("before the delete the page holds %q; the fixture needs the other session's documents to score better", hit.SessionID)
+		}
+	}
+
+	if recorded, err := s.MarkSessionSearchSessionsMissing(ctx); err != nil || recorded != 1 {
+		t.Fatalf("recorded %d sessions as deleted (err %v), want 1", recorded, err)
+	}
+
+	hits, err := s.SearchSessionSearchDocs(ctx, params)
+	if err != nil || len(hits) != 1 || hits[0].SessionID != kept {
+		t.Fatalf("grouped search: %d hits (err %v), want the surviving session", len(hits), err)
+	}
+	if count, err := s.CountSessionSearchDocsMatching(ctx, params); err != nil || count != 1 {
+		t.Fatalf("grouped count = %d (err %v), want 1", count, err)
+	}
+	// Every surviving document is reachable, page by page, exactly once.
+	seen := map[int64]bool{}
+	for offset := 0; offset <= live; offset += page {
+		perMessage.Offset = offset
+		rows, err := s.SearchSessionSearchDocs(ctx, perMessage)
+		if err != nil {
+			t.Fatalf("page at %d: %v", offset, err)
+		}
+		for _, hit := range rows {
+			if hit.SessionID != kept || seen[hit.DocID] {
+				t.Fatalf("page at %d holds %q document %d (seen before: %v)", offset, hit.SessionID, hit.DocID, seen[hit.DocID])
+			}
+			seen[hit.DocID] = true
+		}
+	}
+	if len(seen) != live {
+		t.Fatalf("pages reached %d documents, want all %d", len(seen), live)
+	}
+	if count, err := s.CountSessionSearchDocsMatching(ctx, perMessage); err != nil || count != live {
+		t.Fatalf("per-message count = %d (err %v), want %d", count, err, live)
+	}
+}
+
 // search.db indexes one ao.db. Beside a different one (a restored backup, a
 // swapped data directory) it is cleared, not left describing sessions that do
 // not exist there.

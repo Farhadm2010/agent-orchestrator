@@ -1978,3 +1978,32 @@ the check.
 `TestIndexedSessionsMissingFromTheDatabaseAreRecordedAsDeleted` covers the
 store method: only missing sessions are recorded, a source with no documents
 counts, and a second check adds nothing.
+
+**A follow-up from review: pending deletes and the candidate cap (10 Nov).**
+The ranking stage keeps the best 2,000 full-text matches (§7.5) and only then
+joined them to their documents, where the deleted sessions' documents were
+dropped. The cap is safe only when nothing after it discards a candidate,
+which is why every filter turns it off; the deleted-session exclusion was the
+one discard that did not. More than 2,000 pending documents that matched
+better than a live one took every place: the first page was empty although
+the count found the session, and no later page fetched it. One long deleted
+session is enough, and the check above can record many sessions at once.
+
+- **The fix.** Stage one leaves those documents out before the cap
+  (`rowid NOT IN` the documents of `session_search_deleted`). Their ids are
+  listed once per query, from the deleted sessions to their documents by
+  index.
+- **Cost, on 60,000 documents with a word in 10,000 of them.** Nothing
+  deleted: 31 ms against 34 ms before, no measurable change. 100 deleted
+  sessions holding 20,000 documents: 39 ms. The old query answered that case
+  in 14 ms with no results, although 200 sessions still matched.
+- **A planner trap.** Written as a plain join, SQLite scanned every
+  document's index entry on every search and probed the deleted list for
+  each (5 ms on this index with nothing deleted, growing with the index).
+  `CROSS JOIN` fixes the order from the deleted list, which is usually empty.
+
+Test: `TestDocumentsOfDeletedSessionsDoNotFillTheCandidateCap` puts 2,100
+stronger documents in a session the database does not have beside 30 in one
+it has. Once the first is recorded as deleted, the grouped search returns
+the surviving session, the counts are 1 and 30, and paging by message reaches
+all 30 exactly once. On the old query the first page is empty.

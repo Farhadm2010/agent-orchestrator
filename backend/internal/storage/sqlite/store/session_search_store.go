@@ -170,12 +170,24 @@ func browseSessionFilterArgs(params domain.SessionSearchParams) []any {
 const searchSessionSearchDocsSQL = `
 WITH candidates AS (
     -- Stage one: FTS5 alone ranks the matches by raw bm25 and keeps the best
-    -- ones (sessionSearchCandidateCap; -1 keeps all). No other table is read
-    -- here, so a word that matches thousands of documents costs one pass over
-    -- the posting lists instead of thousands of row lookups.
+    -- ones (sessionSearchCandidateCap; -1 keeps all). No document row is read
+    -- per match, so a word that matches thousands of documents costs one pass
+    -- over the posting lists instead of thousands of row lookups.
+    --
+    -- The documents of deleted sessions are left out here, before the cap,
+    -- not only by the shared filter below: they wait for the sweep, and enough
+    -- of them (one long deleted session) would take every place the cap has
+    -- and leave a match that is a result outside it. Their ids are listed once
+    -- per query, not per match. CROSS JOIN fixes the order: from the deleted
+    -- sessions, usually none, to their documents by index. Left to choose,
+    -- SQLite scanned every document's index entry on every search.
     SELECT rowid AS id, bm25(session_search_fts, 8.0, 1.0, 4.0) AS raw
     FROM session_search_fts
     WHERE session_search_fts MATCH ?
+      AND rowid NOT IN (
+          SELECT gone.id FROM session_search_deleted removed
+          CROSS JOIN session_search_docs gone ON gone.session_id = removed.session_id
+      )
     ORDER BY raw
     LIMIT ?
 ),
@@ -347,7 +359,8 @@ func sessionSearchFiltered(params domain.SessionSearchParams) bool {
 // which is what keeps a broad query fast. The cap is only safe when nothing
 // after stage one can discard a candidate: a filter could reject all 2,000 and
 // hide matches that exist, and a recency sort wants the newest, not the most
-// relevant, so both run uncapped.
+// relevant, so both run uncapped. A deleted session's documents, which every
+// query discards, are left out inside stage one for the same reason.
 //
 // The total counts every match, so every page it advertises must be fetchable,
 // and each result must appear exactly once across them. Every page therefore
