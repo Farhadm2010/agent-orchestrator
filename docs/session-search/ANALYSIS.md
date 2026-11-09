@@ -1167,7 +1167,7 @@ sqlc, the OpenAPI spec and `schema.ts` produced no drift.
   AGENTS.md asks of a new migration. At the fourth (28 Oct, onto `d869fb3119`,
   16 commits) main had shipped `20261028124744441` after that, so it became
   `20261028144134972`. At the fifth (5 Nov, onto `6430fe3b6a`, 175 commits)
-  main had shipped 14 more, so it is now `20261104210028297_session_search.sql`.
+  main had shipped 14 more, so it was `20261104210028297_session_search.sql`, and is now `20261109080000000_session_search.sql` (main shipped `20261109072438921` after it).
   It never shipped. A development database that applied an earlier number must
   drop the `session_search_*` tables first, or the renumbered migration stops
   at "table already exists".
@@ -1592,7 +1592,7 @@ plain copy of every document that the FTS5 table used as external content: 121
 MB of text beside a 41 MB index on this Mac's archive, almost all command
 output. Snippets are cut in Go from the page's rows, so the text is now stored
 compressed (deflate above 256 bytes, `storage/sqlite/searchtext`) and the FTS5
-table is contentless (migration `20261108140000000`). A row is removed with
+table is contentless (migration `20261109080100000`). A row is removed with
 FTS5's `delete` command and the exact text it was indexed with, decoded by
 `ao_search_body()`, a SQL function the daemon registers before opening the
 database. The first version used `contentless_delete`, which removes a row by
@@ -1697,7 +1697,7 @@ index moved out of the app's file.
   `ATTACH` on connect). SQLite resolves the index's table names in the
   attached file, so queries still filter documents by their sessions without
   changing.
-- Migration `20261108200000000_session_search_lock_budget.sql` drops the old
+- Migration `20261109080200000_session_search_lock_budget.sql` drops the old
   in-file tables. All that stays in `ao.db` is `session_search_deleted`: the
   `sessions` delete trigger records the id there (one row), search excludes
   those sessions at once, and the sweep removes their documents from
