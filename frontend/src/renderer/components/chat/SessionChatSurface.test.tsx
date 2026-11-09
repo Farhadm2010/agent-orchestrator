@@ -180,12 +180,14 @@ vi.mock("./ChatWorkspace", async () => {
 			composerNotice,
 			importBlock,
 			findRequest,
+			onFindRequestHandled,
 		}: {
 			importBlock?: string;
 			onSend: typeof sideMocks.workspaceSend;
 			onAddToSideChat?: typeof sideMocks.attach;
 			composerNotice?: ReactNode;
 			findRequest?: { id: string; query: string; messageId?: string };
+			onFindRequestHandled?: (id: string) => void;
 			agentSwitch?: AgentSwitchProps;
 			annotationNavigationRequest?: { id: string; text: string; messageId?: string };
 			agentInputDisabled?: boolean;
@@ -200,7 +202,7 @@ vi.mock("./ChatWorkspace", async () => {
 			configOptions?: ChatConfigOption[];
 			models: ChatModel[];
 			promptSuggestion?: { id: string; text: string };
-			snapshot: Pick<ConversationSnapshot, "sessionId" | "harness" | "settings">;
+			snapshot: Pick<ConversationSnapshot, "conversationId" | "sessionId" | "harness" | "settings">;
 			shellTarget?: { handleId: string };
 		}) => {
 			sideMocks.workspaceSend = onSend;
@@ -231,7 +233,9 @@ vi.mock("./ChatWorkspace", async () => {
 					))}
 					{snapshot.harness === "claude-code" && <TurnSettingsBar models={models} settings={snapshot.settings} harness={snapshot.harness} configOptions={configOptions} onChangeConfigOption={() => {}} />}
 					<div data-testid="prompt-suggestion">{promptSuggestion?.text}</div>
+					<div data-testid="conversation-id">{snapshot.conversationId}</div>
 					<div data-testid="find-request" data-request-id={findRequest?.id ?? ""}>{findRequest ? `${findRequest.query}@${findRequest.messageId ?? ""}` : ""}</div>
+					<button type="button" onClick={() => { if (findRequest) onFindRequestHandled?.(findRequest.id); }}>Apply find request</button>
 					<div data-testid="annotation-request">{annotationNavigationRequest?.messageId ?? ""}</div>
 					<div data-testid="annotation-text">{annotationNavigationRequest?.text ?? ""}</div>
 					<button type="button" onClick={() => { void Promise.resolve(onContinueTurn?.()).catch(() => {}); }}>Continue test turn</button>
@@ -535,6 +539,52 @@ describe("SessionChatSurface search reveal", () => {
 		act(() => requestSessionSearchReveal("sess-1", { messageId: "msg-2", text: "flaky", find: true }));
 		await waitFor(() => expect(screen.getByTestId("find-request")).toHaveTextContent("flaky@msg-2"));
 		expect(screen.getByTestId("find-request").dataset.requestId).not.toBe(first);
+	});
+
+	// Found in review: an orchestrator with nothing cached first renders a
+	// placeholder conversation whose id is the session's. Find opened on it
+	// closed when the real conversation replaced it, and the unchanged request
+	// never opened it again. The match is held until its conversation is shown.
+	it("holds an orchestrator result's match until its conversation has loaded", async () => {
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const orchestrator = { ...session, kind: "orchestrator" } satisfies WorkspaceSession;
+		const loaded = conversationState.snapshot;
+		conversationState.snapshot = undefined;
+		conversationState.isLoading = true;
+		try {
+			requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "flaky", find: true });
+			const tree = () => <Wrapper client={client}><SessionChatSurface session={orchestrator} /></Wrapper>;
+			const view = render(tree());
+			// The placeholder is on screen, and the match is not handed to it.
+			expect(screen.getByTestId("conversation-id")).toHaveTextContent("sess-1");
+			expect(screen.getByTestId("find-request")).toBeEmptyDOMElement();
+			expect(screen.getByTestId("annotation-request")).toBeEmptyDOMElement();
+			// Taken from the hand-off all the same: a later visit must not replay it.
+			expect(peekSessionSearchReveal("sess-1")).toBeUndefined();
+
+			conversationState.snapshot = loaded;
+			conversationState.isLoading = false;
+			view.rerender(tree());
+			await waitFor(() => expect(screen.getByTestId("find-request")).toHaveTextContent("flaky@msg-1"));
+			expect(screen.getByTestId("conversation-id")).toHaveTextContent("conv-sess-1");
+			expect(screen.getByTestId("annotation-request")).toHaveTextContent("msg-1");
+		} finally {
+			conversationState.snapshot = loaded;
+			conversationState.isLoading = false;
+		}
+	});
+
+	it("drops the find request once the chat has applied it", async () => {
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		requestSessionSearchReveal("sess-1", { messageId: "msg-1", text: "flaky", find: true });
+		render(
+			<Wrapper client={client}>
+				<SessionChatSurface session={session} />
+			</Wrapper>,
+		);
+		await waitFor(() => expect(screen.getByTestId("find-request")).toHaveTextContent("flaky@msg-1"));
+		await userEvent.click(screen.getByRole("button", { name: "Apply find request" }));
+		expect(screen.getByTestId("find-request")).toBeEmptyDOMElement();
 	});
 
 	// Find in chat searches user and assistant text only; a word matched in a

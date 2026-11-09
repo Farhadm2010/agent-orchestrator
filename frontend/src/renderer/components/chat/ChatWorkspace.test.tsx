@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { Activity, Profiler, useState } from "react";
 import { placeLexicalCaret, typeInLexicalEditor } from "../../test/lexical";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatWorkspace, promptSpacerHeight, promptTopInset } from "./ChatWorkspace";
+import { ChatWorkspace, promptSpacerHeight, promptTopInset, type ChatFindRequest } from "./ChatWorkspace";
 import { AssistantMessage, HumanMessage, OriginMessage } from "./ChatTimelineItems";
 import { AutomationMessage } from "./AutomationMessage";
 import { ChatLinkProvider } from "./ChatMarkdown";
@@ -2090,6 +2090,40 @@ describe("ChatWorkspace timeline", () => {
 		rerender(<Host snapshot={chatFixtureSettled} initial={request} />);
 		rerender(<Host snapshot={other} initial={request} />);
 		expect(screen.queryByText("The referenced message is no longer available in this chat.")).not.toBeInTheDocument();
+	});
+
+	// A search result opens find in chat through findRequest. Its owner is told
+	// once it applied and drops it: the chat remounts when its conversation
+	// reloads, and a request still held would open find again after the reader
+	// closed it.
+	it("opens find for a request once, so a remount does not open it again", async () => {
+		const get = vi.fn(async () => ({ data: { conversationId: chatFixtureSettled.conversationId, transcriptRevision: "find-request", occurrences: [], total: 0 }, response: new Response() }));
+		const client = vi.spyOn(clientForSessionHost(), "GET").mockImplementation(get as never);
+		const handled = vi.fn();
+		function Host({ mount }: { mount: number }) {
+			const [request, setRequest] = useState<ChatFindRequest | undefined>({ id: "search:1", query: "zephyr", messageId: "m-1" });
+			return (
+				<ChatWorkspace
+					key={mount}
+					snapshot={chatFixtureSettled}
+					findRequest={request}
+					onFindRequestHandled={(id) => { handled(id); setRequest((current) => current?.id === id ? undefined : current); }}
+				/>
+			);
+		}
+		try {
+			const view = render(<Host mount={1} />);
+			const input = await screen.findByRole("searchbox", { name: "Find in chat" });
+			expect(input).toHaveValue("zephyr");
+			expect(handled).toHaveBeenCalledWith("search:1");
+			fireEvent.keyDown(input, { key: "Escape" });
+			expect(screen.queryByRole("searchbox", { name: "Find in chat" })).not.toBeInTheDocument();
+			view.rerender(<Host mount={2} />);
+			await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+			expect(screen.queryByRole("searchbox", { name: "Find in chat" })).not.toBeInTheDocument();
+		} finally {
+			client.mockRestore();
+		}
 	});
 
 	it("hides Add to chat on surfaces whose send does not forward excerpts", () => {

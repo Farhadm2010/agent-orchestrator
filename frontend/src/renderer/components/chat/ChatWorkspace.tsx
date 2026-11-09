@@ -384,6 +384,8 @@ export interface ChatWorkspaceProps {
 	 * id opens it again.
 	 */
 	findRequest?: ChatFindRequest;
+	/** Called once the chat applied findRequest, so its owner drops it rather than have a later mount open find again. */
+	onFindRequestHandled?: (id: string) => void;
 	snapshot: ConversationSnapshot;
 	promptSuggestion?: ComposerPromptSuggestion;
 	/** Renderer-owned state identity; the snapshot's sessionId remains the daemon wire ID. */
@@ -748,6 +750,7 @@ function ChatWorkspaceContent({
 	annotationNavigationRequest,
 	onAnnotationNavigationHandled,
 	findRequest,
+	onFindRequestHandled,
 	snapshot,
 	promptSuggestion,
 	sessionTitle,
@@ -2104,6 +2107,7 @@ function ChatWorkspaceContent({
 							onAddToSideChat={onAddToSideChat}
 									checkingSideChatAvailability={checkingSideChatAvailability}
 									findRequest={findRequest}
+									onFindRequestHandled={onFindRequestHandled}
 									workerUpdates={sessionRole === "orchestrator"}
 									annotationNavigationRef={annotationNavigationRef}
 									key={draftScopeKey}
@@ -2967,6 +2971,7 @@ export function Timeline({
 	openingStartedAt,
 	openingStartupLabel,
 	findRequest,
+	onFindRequestHandled,
 }: {
 	onAddToSideChat?: ChatWorkspaceProps["onAddToSideChat"];
 	checkingSideChatAvailability?: boolean;
@@ -3016,6 +3021,7 @@ export function Timeline({
 	openingStartupLabel?: string;
 	/** Opens find in chat with a query; see ChatWorkspaceProps.findRequest. */
 	findRequest?: ChatFindRequest;
+	onFindRequestHandled?: ChatWorkspaceProps["onFindRequestHandled"];
 }) {
 	const findSurface = useRef<HTMLDivElement>(null);
 	const scroller = useRef<HTMLDivElement>(null);
@@ -3025,12 +3031,17 @@ export function Timeline({
 	const [findTarget, setFindTarget] = useState<FindOccurrence>();
 	const find = useChatFind({ source: sourceSnapshot, root: findSurface, viewport: scroller, hostId: useContext(ChatHostId), unavailable: findUnavailable, sideChat, pauseFollow: () => pauseFindFollow.current(), onScrollWritten: (top) => findScrollWritten.current(top), reveal: (hit) => setFindTarget({ ...hit }) });
 	// One open per request. openWith changes identity as find opens and closes,
-	// so it is read through a ref: only a new request may open find again.
+	// so it is read through a ref: only a new request may open find again. The
+	// owner is told, so it drops the request: this timeline remounts when its
+	// conversation reloads, and a request still held would open find again
+	// after the reader closed it.
 	const openFind = useRef(find.openWith);
 	openFind.current = find.openWith;
 	useEffect(() => {
-		if (findRequest) openFind.current(findRequest.query, findRequest.messageId);
-	}, [findRequest]);
+		if (!findRequest) return;
+		openFind.current(findRequest.query, findRequest.messageId);
+		onFindRequestHandled?.(findRequest.id);
+	}, [findRequest, onFindRequestHandled]);
 	const snapshot = find.snapshot;
 	const hasTranscript = snapshot.items.length > 0;
 	const arrivedEmpty = useRef(false);
