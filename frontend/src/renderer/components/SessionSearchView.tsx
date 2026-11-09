@@ -18,7 +18,7 @@ import {
 	type SessionSearchResult,
 } from "../hooks/useSessionSearch";
 import { PageTopbar, PageTopbarTitle } from "./PageTopbar";
-import { TopbarButton } from "./TopbarButton";
+import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 
@@ -165,7 +165,7 @@ export function SessionSearchView() {
 						triggerClassName="h-(--size-control-md)! text-xs!"
 					/>
 					{filtersActive ? (
-						<TopbarButton onClick={clearFilters}>{t("search.clearFilters")}</TopbarButton>
+						<Button type="button" size="sm" onClick={clearFilters}>{t("search.clearFilters")}</Button>
 					) : null}
 				</>}
 			/>
@@ -270,13 +270,13 @@ export function SessionSearchView() {
 									{search.pageError ? (
 										<div role="alert" className="flex items-center justify-center gap-2 pt-3 text-sm text-destructive">
 											<span>{t("search.pageFailed")}</span>
-											<TopbarButton onClick={search.retryPage}>{t("search.retry")}</TopbarButton>
+											<Button type="button" size="sm" onClick={search.retryPage}>{t("search.retry")}</Button>
 										</div>
 									) : hasMore ? (
 										<div className="flex justify-center pt-3">
-											<TopbarButton onClick={() => setPaging({ key: pageKey, pages: pages + 1 })}>
+											<Button type="button" size="sm" onClick={() => setPaging({ key: pageKey, pages: pages + 1 })}>
 												{t("search.showMore", { remaining: total - results.length })}
-											</TopbarButton>
+											</Button>
 										</div>
 									) : null}
 									<CoverageNote coverage={coverage} className="px-3 pt-4" />
