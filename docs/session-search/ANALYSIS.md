@@ -1746,3 +1746,70 @@ and WAL readers never wait for it.
 - A database that ran this branch before this change keeps the dropped
   index's free pages in `ao.db` until a `VACUUM`. Main never had them.
 
+
+### 8.14 Orca's coverage, and a build twice as fast (9 Nov 2026)
+
+**Coverage, decided by Dhruv: follow Orca for reasoning, tool input and tool
+output** (`sessionsearch/coverage.go`, the same for AO Chat, Claude Code,
+Codex and OpenCode):
+
+- A tool call is `name: argument`. The argument is the first of `command`,
+  `cmd`, `file_path`, `path`, `pattern`, `query`, `description` that holds text,
+  cut to 2,000 characters; edit and write contents are not indexed.
+- A tool result keeps its first 3,072 characters, read from its text parts.
+- Reasoning (Claude thinking, Codex and OpenCode reasoning, AO Chat reasoning
+  activities) is not indexed.
+- File changes keep their paths, not their diffs.
+- Messages, plans, titles and paths are unchanged. The Chat format (5) and the
+  native reader version (`native-v4`) move, so every source is re-read.
+
+**Measured** on the 126 real transcripts (667 MB) of the Orca comparison, the
+commit before against this branch, run back to back:
+
+| | Before | After | Orca |
+| --- | --- | --- | --- |
+| Index file (`search.db`) | 49.7 MB | **18.0 MB** | 29 MB |
+| Build time | 8.3 s | **3.1 s** | 2.9 s |
+| Peak memory | 87 MB | **81 MB** | 229 MB |
+| Agentic suite R@1 (43) | 93.0 | **93.0** (all 43 identical) | 81.4 |
+| Real-transcript suite R@1 (321) | 98.4 | 72.0 | 71.0 |
+
+The real-transcript suite was built to probe exactly the content this drops
+(words found only in thinking, edit contents or output past 3 KB), so it moves
+by design:
+
+| Category | Before | After | Orca |
+| --- | --- | --- | --- |
+| User messages (45) | 97.8 | 97.8 | 100 |
+| Assistant replies (58) | 98.3 | 98.3 | 98.3 |
+| Short output (60) | 100 | 100 | 100 |
+| Start of long output (39) | 94.9 | **100** | 100 |
+| Long messages (2) | 100 | 100 | 100 |
+| Output from 3 KB to 8 KB (37) | 100 | 21.6 | 21.6 |
+| End of long output (35) | 97.1 | 14.3 | 14.3 |
+| Thinking (42) | 100 | 35.7 | 26.2 |
+| Edit contents (2) | 100 | 0 | 0 |
+
+**Build cost, the four options measured:**
+
+1. *Bigger batches* (256 to 2,048 documents per commit): no change (6.3 to
+   6.5 s). The profile showed why: SQLite statements are about 6% of the build,
+   and most transcripts write fewer than 256 documents, so they already commit
+   once each. Left at 256.
+2. *Preparing documents in parallel*: 6.3 to **3.1 s**, identical rankings on
+   all 321 searches. Reading, parsing and building a source's documents only
+   reads, so up to three sources are prepared at once, at most six ahead, and
+   one goroutine writes them in order (`forEachNativePlan`). Peak memory did
+   not rise.
+3. *Compaction after a build* (FTS5 `optimize` and `VACUUM`, 0.5 s): 18.1 to
+   17.2 MB and no change in search speed (p95 8.95 to 8.55 ms). A fresh build
+   has few free pages; not added.
+4. *Profile*: before the parallel change, reading the transcripts was 1.0 s,
+   decoding their JSON 0.9 s, writing 1.0 s, and the runtime handing memory
+   back 1.5 s. The build allocated 2.3 GB for 667 MB of transcripts, most of
+   it copying whole tool results only to keep their first 3,072 characters. A
+   reused line buffer took a little of that (6.4 to 6.3 s). The single writer
+   (1.3 s) is now the floor; decoding tool results only up to what is kept,
+   and compressing text on the preparing goroutines, are the next steps.
+   Orca's identifier column and reading snippets back from `ao.db` are not
+   needed: the index is already smaller than Orca's.

@@ -1223,9 +1223,15 @@ func (s *Service) indexAll(ctx context.Context) (int, error) {
 				}
 				written += count
 			}
-			if s.indexNativeSession(ctx, target) {
+		}
+		s.forEachNativePlan(ctx, targets[start:end], func(plan nativePlan) bool {
+			if s.applyNativePlan(ctx, plan) {
 				written++
 			}
+			return ctx.Err() == nil
+		})
+		if err := ctx.Err(); err != nil {
+			return written, err
 		}
 		// Yield so a backfill cannot hold the writer connection or a CPU while
 		// other sessions are working.
@@ -1287,15 +1293,13 @@ func (s *Service) Sweep(ctx context.Context) (int, error) {
 	if err != nil {
 		return written, err
 	}
-	for _, target := range targets {
-		if err := ctx.Err(); err != nil {
-			return written, err
-		}
-		if s.indexNativeSession(ctx, target) {
+	s.forEachNativePlan(ctx, targets, func(plan nativePlan) bool {
+		if s.applyNativePlan(ctx, plan) {
 			written++
 		}
-	}
-	return written, nil
+		return ctx.Err() == nil
+	})
+	return written, ctx.Err()
 }
 
 // recordSourceError marks a source unavailable without deleting what it already

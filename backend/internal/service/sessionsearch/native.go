@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -105,24 +106,62 @@ func nativeDocs(sourceKey string, target domain.SessionSearchTarget, machine str
 // truncated, so the source restarts from zero instead of reading from a stale
 // offset.
 func (s *Service) indexNativeSession(ctx context.Context, target domain.SessionSearchTarget) bool {
-	sourceKey := NativeSourceKey(target.Harness, string(target.ID))
+	return s.applyNativePlan(ctx, s.planNativeSession(ctx, target))
+}
+
+// nativeOutcome is what preparing a native source decided to do with it.
+type nativeOutcome int
+
+const (
+	nativeSkip        nativeOutcome = iota // nothing to write (a read failed and was logged, or nothing new)
+	nativeOpenCode                         // read through the OpenCode database instead
+	nativeUnsupported                      // the harness has no transcript AO reads
+	nativeMissing                          // no transcript on disk
+	nativeFailed                           // record err on the source
+	nativeRead                             // docs are ready to write
+)
+
+// nativePlan is everything indexing one native source needs, gathered by
+// planNativeSession without writing anything, so plans can be prepared in
+// parallel (forEachNativePlan) while one goroutine writes them in order.
+type nativePlan struct {
+	target      domain.SessionSearchTarget
+	sourceKey   string
+	outcome     nativeOutcome
+	err         error
+	previous    domain.SessionSearchSource
+	hadPrevious bool
+	path        string
+	info        os.FileInfo
+	format      string
+	reset       bool
+	upToDate    bool
+	nextOffset  int64
+	docs        []domain.SessionSearchDoc
+	now         time.Time
+}
+
+// planNativeSession reads a source's state and its transcript and builds its
+// documents. It only reads.
+func (s *Service) planNativeSession(ctx context.Context, target domain.SessionSearchTarget) nativePlan {
+	plan := nativePlan{target: target, sourceKey: NativeSourceKey(target.Harness, string(target.ID))}
 	// OpenCode keeps its history in its own database rather than a transcript,
 	// so it is read through its own path.
 	switch target.Harness {
-	case domain.HarnessOpenCode:
-		return s.indexOpenCodeSession(ctx, target, s.roots.OpenCodeData)
-	case domain.HarnessOpenCodeV2:
-		return s.indexOpenCodeSession(ctx, target, s.roots.OpenCodeV2Data)
+	case domain.HarnessOpenCode, domain.HarnessOpenCodeV2:
+		plan.outcome = nativeOpenCode
+		return plan
 	}
 	if !nativeHarnessSupported(target.Harness) {
-		s.markUnsupported(ctx, sourceKey, target)
-		return false
+		plan.outcome = nativeUnsupported
+		return plan
 	}
-	previous, hadPrevious, err := s.store.GetSessionSearchSource(ctx, sourceKey)
+	previous, hadPrevious, err := s.store.GetSessionSearchSource(ctx, plan.sourceKey)
 	if err != nil {
-		s.log.Warn("session search source read failed", "source", sourceKey, "error", err)
-		return false
+		s.log.Warn("session search source read failed", "source", plan.sourceKey, "error", err)
+		return plan
 	}
+	plan.previous, plan.hadPrevious = previous, hadPrevious
 	// Reuse the recorded path when it still exists. Resolving from scratch globs
 	// the provider's whole transcript tree, and doing that per session on every
 	// 30-second sweep is the single most expensive thing an idle sweep can do.
@@ -147,59 +186,55 @@ func (s *Service) indexNativeSession(ctx context.Context, target domain.SessionS
 	if path == "" {
 		resolved, resolveErr := s.locateTranscript(target)
 		if resolveErr != nil {
-			s.recordSourceError(ctx, sourceKey, domain.SessionSearchSourceNative, target, resolveErr)
-			return false
+			plan.outcome, plan.err = nativeFailed, resolveErr
+			return plan
 		}
 		path = resolved
 	}
 	if path == "" {
-		// No transcript on disk is normal for a Chat session or a session whose
-		// workspace is gone. Record that once so later sweeps do not re-glob the
-		// provider's whole tree for a session that has nothing to read, then keep
-		// any documents already indexed.
-		s.recordMissingTranscript(ctx, sourceKey, target, hadPrevious, previous)
-		return false
+		plan.outcome = nativeMissing
+		return plan
 	}
 	info, statErr := os.Stat(path)
 	if statErr != nil {
-		s.recordSourceError(ctx, sourceKey, domain.SessionSearchSourceNative, target, statErr)
-		return false
+		plan.outcome, plan.err = nativeFailed, statErr
+		return plan
 	}
+	plan.path, plan.info = path, info
 	// A source read by an older reader, or a Codex rollout that started writing
 	// its item stream after it was first read, is read again from the start.
 	parser, format := nativeParserFor(target.Harness, path)
+	plan.format = format
 	formatChanged := hadPrevious && previous.Fingerprint != format
 	offset := int64(0)
 	if hadPrevious && !formatChanged && previous.Path == path && previous.FileSize <= info.Size() {
 		offset = previous.CursorValue
 	}
-	if hadPrevious && (formatChanged || previous.Path != path || previous.FileSize > info.Size()) {
-		// The transcript was replaced or truncated, or an older reader indexed
-		// it: its earlier documents describe text this pass will not rewrite.
-		if err := s.store.DeleteSessionSearchDocsForSource(ctx, sourceKey); err != nil {
-			s.log.Warn("session search reset failed", "source", sourceKey, "error", err)
-			return false
-		}
-	}
+	// The transcript was replaced or truncated, or an older reader indexed
+	// it: its earlier documents describe text this pass will not rewrite.
+	plan.reset = hadPrevious && (formatChanged || previous.Path != path || previous.FileSize > info.Size())
 	if offset >= info.Size() && hadPrevious && previous.State == domain.SessionSearchSourceActive {
-		return false
+		plan.upToDate = true
+		plan.outcome = nativeRead
+		return plan
 	}
 	lines, nextOffset, readErr := readNativeTranscript(ctx, path, offset, parser)
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		s.recordSourceError(ctx, sourceKey, domain.SessionSearchSourceNative, target, readErr)
-		return false
+		plan.outcome, plan.err = nativeFailed, readErr
+		return plan
 	}
-	now := s.now()
+	plan.nextOffset = nextOffset
+	plan.now = s.now()
 	docs := make([]domain.SessionSearchDoc, 0, len(lines)+1)
 	for _, line := range lines {
-		docs = append(docs, nativeDocs(sourceKey, target, s.machine, line, now)...)
+		docs = append(docs, nativeDocs(plan.sourceKey, target, s.machine, line, plan.now)...)
 	}
 	// The session's own name and prompt make it findable even when the provider
 	// transcript holds nothing (or the session is a TUI session whose transcript
 	// AO could not parse).
 	if title := strings.TrimSpace(target.DisplayName); title != "" {
 		docs = append(docs, domain.SessionSearchDoc{
-			SourceKey: sourceKey,
+			SourceKey: plan.sourceKey,
 			DocKey:    "title",
 			SessionID: string(target.ID),
 			ProjectID: string(target.ProjectID),
@@ -209,12 +244,52 @@ func (s *Service) indexNativeSession(ctx context.Context, target domain.SessionS
 			Title:     truncateBytes(title, maxTitleBytes),
 			Body:      searchableText(firstNonEmpty(target.LatestPrompt, target.Prompt)),
 			CreatedAt: target.CreatedAt,
-			IndexedAt: now,
+			IndexedAt: plan.now,
 		})
+	}
+	plan.docs = docs
+	plan.outcome = nativeRead
+	return plan
+}
+
+// applyNativePlan writes what planNativeSession prepared. It returns true when
+// it wrote documents.
+func (s *Service) applyNativePlan(ctx context.Context, plan nativePlan) bool {
+	target, sourceKey := plan.target, plan.sourceKey
+	switch plan.outcome {
+	case nativeSkip:
+		return false
+	case nativeOpenCode:
+		if target.Harness == domain.HarnessOpenCodeV2 {
+			return s.indexOpenCodeSession(ctx, target, s.roots.OpenCodeV2Data)
+		}
+		return s.indexOpenCodeSession(ctx, target, s.roots.OpenCodeData)
+	case nativeUnsupported:
+		s.markUnsupported(ctx, sourceKey, target)
+		return false
+	case nativeMissing:
+		// No transcript on disk is normal for a Chat session or a session whose
+		// workspace is gone. Record that once so later sweeps do not re-glob the
+		// provider's whole tree for a session that has nothing to read, then keep
+		// any documents already indexed.
+		s.recordMissingTranscript(ctx, sourceKey, target, plan.hadPrevious, plan.previous)
+		return false
+	case nativeFailed:
+		s.recordSourceError(ctx, sourceKey, domain.SessionSearchSourceNative, target, plan.err)
+		return false
+	}
+	if plan.reset {
+		if err := s.store.DeleteSessionSearchDocsForSource(ctx, sourceKey); err != nil {
+			s.log.Warn("session search reset failed", "source", sourceKey, "error", err)
+			return false
+		}
+	}
+	if plan.upToDate {
+		return false
 	}
 	// A transcript is read forward from its cursor, so its documents only grow:
 	// nothing is deleted here, and unchanged ones (the title) are not rewritten.
-	if _, err := s.writeChanged(ctx, sourceKey, docs, false); err != nil {
+	if _, err := s.writeChanged(ctx, sourceKey, plan.docs, false); err != nil {
 		s.recordSourceError(ctx, sourceKey, domain.SessionSearchSourceNative, target, err)
 		return false
 	}
@@ -228,20 +303,89 @@ func (s *Service) indexNativeSession(ctx context.Context, target domain.SessionS
 		SessionID:   string(target.ID),
 		ProjectID:   string(target.ProjectID),
 		Harness:     string(target.Harness),
-		Path:        path,
-		CursorValue: nextOffset,
-		FileSize:    info.Size(),
-		FileMtime:   info.ModTime().UnixNano(),
-		Fingerprint: format,
+		Path:        plan.path,
+		CursorValue: plan.nextOffset,
+		FileSize:    plan.info.Size(),
+		FileMtime:   plan.info.ModTime().UnixNano(),
+		Fingerprint: plan.format,
 		DocCount:    count,
 		State:       domain.SessionSearchSourceActive,
-		UpdatedAt:   now,
+		UpdatedAt:   plan.now,
 	}
 	if err := s.store.UpsertSessionSearchSource(ctx, source); err != nil {
 		s.log.Warn("session search source update failed", "source", sourceKey, "error", err)
 		return false
 	}
-	return len(docs) > 0
+	return len(plan.docs) > 0
+}
+
+// Preparing a native source (reading and parsing its transcript, building its
+// documents) is most of a backfill's time and needs no lock, so up to
+// nativePrepareWorkers sources are prepared at once, at most nativePrepareAhead
+// ahead of the one being written. Plans hold a source's documents, which are
+// bounded per document (coverage.go), so this also bounds memory.
+const (
+	nativePrepareWorkers = 3
+	nativePrepareAhead   = 6
+)
+
+// forEachNativePlan prepares targets in parallel and calls apply with each
+// plan in the targets' order, on the calling goroutine. It stops early when
+// ctx is done or apply returns false.
+func (s *Service) forEachNativePlan(ctx context.Context, targets []domain.SessionSearchTarget, apply func(nativePlan) bool) {
+	if len(targets) == 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+	plans := make([]chan nativePlan, len(targets))
+	for index := range plans {
+		plans[index] = make(chan nativePlan, 1)
+	}
+	ahead := make(chan struct{}, nativePrepareAhead)
+	work := make(chan int)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(work)
+		for index := range targets {
+			select {
+			case ahead <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case work <- index:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	for range min(nativePrepareWorkers, len(targets)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range work {
+				plans[index] <- s.planNativeSession(ctx, targets[index])
+			}
+		}()
+	}
+	for index := range targets {
+		var plan nativePlan
+		select {
+		case plan = <-plans[index]:
+		case <-ctx.Done():
+			return
+		}
+		<-ahead
+		if !apply(plan) {
+			return
+		}
+	}
 }
 
 // markUnsupported records that a harness has no parsed transcript, once, and
@@ -962,11 +1106,17 @@ func readNativeTranscript(ctx context.Context, path string, offset int64, parser
 	reader := bufio.NewReaderSize(file, nativeReadChunk)
 	lines := make([]nativeLine, 0, 128)
 	consumed := offset
+	// One buffer holds each line in turn. ReadBytes allocated a copy of every
+	// line, and a transcript has lines of megabytes of tool output: on 667 MB
+	// of transcripts a quarter of the build went to the runtime handing that
+	// memory back. The parsers copy whatever they keep.
+	var raw []byte
 	for {
 		if err := ctx.Err(); err != nil {
 			return lines, consumed, err
 		}
-		raw, readErr := reader.ReadBytes('\n')
+		var readErr error
+		raw, readErr = readLine(reader, raw[:0])
 		if errors.Is(readErr, io.EOF) {
 			// A record without its terminating newline is still being written.
 			return lines, consumed, nil
@@ -980,6 +1130,17 @@ func readNativeTranscript(ctx context.Context, path string, offset int64, parser
 			unit.offset = lineOffset
 			unit.text = boundNativeText(unit.kind, unit.text)
 			lines = append(lines, unit)
+		}
+	}
+}
+
+// readLine appends the next line, through its newline, to buf.
+func readLine(reader *bufio.Reader, buf []byte) ([]byte, error) {
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		buf = append(buf, chunk...)
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return buf, err
 		}
 	}
 }
