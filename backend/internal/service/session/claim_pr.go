@@ -157,6 +157,9 @@ func (s *Service) ClaimPR(ctx context.Context, id domain.SessionID, ref string, 
 	res := ClaimPRResult{PRs: prs, BranchChanged: false, DonorWasTerminated: outcome.OwnerTerminated}
 	if outcome.PreviousOwner != "" && outcome.PreviousOwner != id {
 		res.TakenOverFrom = []domain.SessionID{outcome.PreviousOwner}
+		if s.prMoved != nil && !outcome.OwnerTerminated {
+			s.prMoved(context.WithoutCancel(ctx), outcome.PreviousOwner, id, pr)
+		}
 	}
 	return res, nil
 }

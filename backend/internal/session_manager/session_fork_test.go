@@ -1,0 +1,635 @@
+package sessionmanager
+
+import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/forkseed"
+	"github.com/aoagents/agent-orchestrator/backend/internal/attachmentstore"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+)
+
+// forkSourceWorktree makes a source session worktree with an unpushed commit,
+// an edit, and a new file.
+func forkSourceWorktree(t *testing.T, repo string) string {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "source")
+	runManagerGit(t, repo, "worktree", "add", "-q", "-b", "ao/source", src, "main")
+	runManagerGit(t, src, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "unpushed")
+	if err := os.WriteFile(filepath.Join(src, "README.md"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "new.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return src
+}
+
+func captureForkSeed(t *testing.T, src string) (head, ref string) {
+	t.Helper()
+	ref = forkseed.RefPrefix + "test"
+	head, err := forkseed.Capture(context.Background(), src, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return head, ref
+}
+
+func TestForkCopiesUncommittedAndUntracked(t *testing.T) {
+	m, st, _, repo := newGitTaskPreparationManager(t)
+	src := forkSourceWorktree(t, repo)
+	status := runManagerGit(t, src, "status", "--porcelain")
+	head, ref := captureForkSeed(t, src)
+	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Fork: &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: head, SeedRef: ref}}
+	ws, _, err := m.createSessionWorkspace(context.Background(), st.projects["mer"], cfg, "mer-1", "ao/mer-1/root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(runManagerGit(t, ws.Path, "rev-parse", "HEAD")); got != head {
+		t.Fatalf("fork HEAD = %s, want source HEAD %s", got, head)
+	}
+	for name, want := range map[string]string{"README.md": "edited\n", "new.txt": "new\n"} {
+		b, err := os.ReadFile(filepath.Join(ws.Path, name))
+		if err != nil || string(b) != want {
+			t.Fatalf("%s = %q, %v; want %q", name, b, err, want)
+		}
+	}
+	if got := runManagerGit(t, src, "status", "--porcelain"); got != status {
+		t.Fatalf("source status changed: %q, want %q", got, status)
+	}
+	if refs := runManagerGit(t, repo, "for-each-ref", forkseed.RefPrefix); strings.TrimSpace(refs) != "" {
+		t.Fatalf("seed ref left behind: %q", refs)
+	}
+}
+
+type failingForkSeeds struct{ deleted []string }
+
+func (f *failingForkSeeds) Apply(context.Context, string, string) error { return errors.New("boom") }
+
+func (*failingForkSeeds) RecordBase(context.Context, string, string) error { return nil }
+func (*failingForkSeeds) UnchangedSince(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (*failingForkSeeds) DiscardChanges(context.Context, string) error { return nil }
+func (f *failingForkSeeds) Delete(_ context.Context, _ string, ref string) error {
+	f.deleted = append(f.deleted, ref)
+	return nil
+}
+
+func TestForkRestoreFailureRollsBack(t *testing.T) {
+	m, st, _, repo := newGitTaskPreparationManager(t)
+	src := forkSourceWorktree(t, repo)
+	head, ref := captureForkSeed(t, src)
+	seeds := &failingForkSeeds{}
+	m.forkSeeds = seeds
+	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Fork: &ports.SpawnFork{StartPoint: head, SeedRef: ref}}
+	ws, _, err := m.createSessionWorkspace(context.Background(), st.projects["mer"], cfg, "mer-1", "ao/mer-1/root", nil)
+	if err == nil {
+		t.Fatal("want an error when the files can't be copied")
+	}
+	// The caller rolls back a returned worktree; it must be reported.
+	if ws.Path == "" {
+		t.Fatal("the created worktree must be returned for rollback")
+	}
+	if len(seeds.deleted) != 1 || seeds.deleted[0] != ref {
+		t.Fatalf("seed ref not deleted: %v", seeds.deleted)
+	}
+}
+
+func TestChatForkStartsFromPreparedConversation(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, _, _ := newChatManager(launcher)
+	var target ports.ForkTarget
+	rec, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		RequestedMode: domain.SessionModeChat,
+		Fork: &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc", PrepareChat: func(_ context.Context, got ports.ForkTarget) (string, error) {
+			target = got
+			return "forked-thread", nil
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if len(launcher.started) != 1 || launcher.started[0].ProviderConversationID != "forked-thread" {
+		t.Fatalf("started = %+v", launcher.started)
+	}
+	if target.SessionID != rec.ID || target.WorkspacePath == "" || target.WorkspacePath != launcher.started[0].WorkspacePath {
+		t.Fatalf("target = %+v, started in %q", target, launcher.started[0].WorkspacePath)
+	}
+}
+
+func TestFailedChatForkStartsNothing(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, _, _ := newChatManager(launcher)
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		RequestedMode: domain.SessionModeChat,
+		Fork: &ports.SpawnFork{StartPoint: "abc", PrepareChat: func(context.Context, ports.ForkTarget) (string, error) {
+			return "", errors.New("no native session")
+		}},
+	})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if len(launcher.started) != 0 {
+		t.Fatalf("started = %+v", launcher.started)
+	}
+}
+
+func TestForkCopiesArtifacts(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, _, _ := newChatManager(launcher)
+	m.dataDir = t.TempDir()
+	srcDir := m.artifactDir("mer-0")
+	if err := os.MkdirAll(filepath.Join(srcDir, "page"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "page", "index.html"), []byte("<h1>hi</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		RequestedMode: domain.SessionModeChat,
+		Fork:          &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(m.artifactDir(rec.ID), "page", "index.html"))
+	if err != nil || string(got) != "<h1>hi</h1>" {
+		t.Fatalf("artifact = %q, %v", got, err)
+	}
+	// The copy is independent: removing the source's artifacts keeps the fork's.
+	if err := os.RemoveAll(srcDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(m.artifactDir(rec.ID), "page", "index.html")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type lineageStore struct {
+	*fakeStore
+	forks map[domain.SessionID]domain.SessionFork
+}
+
+func (s lineageStore) GetSessionFork(_ context.Context, id domain.SessionID) (domain.SessionFork, bool, error) {
+	f, ok := s.forks[id]
+	return f, ok, nil
+}
+
+func TestForkPromptStatesNewIdentity(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, _, _ := newChatManager(launcher)
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		RequestedMode: domain.SessionModeChat,
+		Fork:          &ports.SpawnFork{SourceSessionID: "mer-0", SourceTitle: "Fix login", StartPoint: "abc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := launcher.started[0].SystemPrompt
+	for _, want := range []string{"fork of Orchestrator session mer-0", `"Fix login"`, "pull requests belong to the original", "own worktree"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt lacks %q", want)
+		}
+	}
+}
+
+func TestForkPromptSurvivesRestore(t *testing.T) {
+	m, st, _, _ := newManager()
+	m.store = lineageStore{fakeStore: st, forks: map[domain.SessionID]domain.SessionFork{
+		"mer-5": {ForkSessionID: "mer-5", SourceSessionID: "mer-0", SourceTitle: "Fix login"},
+	}}
+	prompt, err := m.buildSystemPrompt(context.Background(), domain.KindWorker, "mer", "mer-5", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "fork of Orchestrator session mer-0") {
+		t.Fatalf("restored fork lost its fork instructions:\n%s", prompt)
+	}
+	plain, err := m.buildSystemPrompt(context.Background(), domain.KindWorker, "mer", "mer-6", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "Session Fork") {
+		t.Fatal("a normal session got fork instructions")
+	}
+}
+
+// transcriptAgent keeps each native session as <dir>/<id>.jsonl.
+type transcriptAgent struct {
+	fakeAgent
+	dir string
+}
+
+func (a transcriptAgent) NativeSessionConfigDir(context.Context, map[string]string) (string, error) {
+	return a.dir, nil
+}
+
+func (a transcriptAgent) LocateTranscript(_ context.Context, ref ports.NativeSessionRef) (string, bool, error) {
+	path := filepath.Join(ref.ConfigDir, ref.NativeSessionID+".jsonl")
+	if _, err := os.Stat(path); err != nil {
+		return "", false, nil
+	}
+	return path, true, nil
+}
+
+func forkDeleteManager(t *testing.T, harness domain.AgentHarness) (*Manager, string) {
+	t.Helper()
+	m, st, _, _ := newManager()
+	m.dataDir = t.TempDir()
+	native := t.TempDir()
+	m.agents = singleAgent{agent: transcriptAgent{dir: native}}
+	m.store = lineageStore{fakeStore: st, forks: map[domain.SessionID]domain.SessionFork{
+		"mer-5": {ForkSessionID: "mer-5", SourceSessionID: "mer-0"},
+	}}
+	for _, id := range []domain.SessionID{"mer-0", "mer-5"} {
+		st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", Kind: domain.KindWorker, Harness: harness, IsTerminated: true,
+			Mode: domain.SessionModeChat, Metadata: domain.SessionMetadata{ProviderConversationID: "native-" + string(id), WorkspacePath: "/ws/" + string(id)}}
+		if st.cleanupFacts == nil {
+			st.cleanupFacts = map[domain.SessionID]domain.SessionCleanupRecord{}
+		}
+		st.cleanupFacts[id] = domain.SessionCleanupRecord{SessionID: id, WorkspaceDisposition: domain.DispositionRemoved}
+		if err := os.MkdirAll(m.artifactDir(id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(native, "native-"+string(id)+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return m, native
+}
+
+func TestDeletingForkLeavesNoLeftovers(t *testing.T) {
+	for _, harness := range []domain.AgentHarness{domain.HarnessClaudeCode, domain.HarnessCodex} {
+		m, native := forkDeleteManager(t, harness)
+		if err := m.DeleteSession(context.Background(), "mer-5", false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(m.artifactDir("mer-5")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: fork artifacts left: %v", harness, err)
+		}
+		if _, err := os.Stat(filepath.Join(native, "native-mer-5.jsonl")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: fork's native session left: %v", harness, err)
+		}
+		if _, err := os.Stat(filepath.Join(native, "native-mer-0.jsonl")); err != nil {
+			t.Fatalf("%s: source's native session removed: %v", harness, err)
+		}
+	}
+}
+
+func TestDeletingForkKeepsSourceProviderSession(t *testing.T) {
+	m, native := forkDeleteManager(t, domain.HarnessCodex)
+	if err := m.DeleteSession(context.Background(), "mer-0", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(native, "native-mer-0.jsonl")); err != nil {
+		t.Fatalf("deleting a normal session removed its provider session: %v", err)
+	}
+	if _, err := os.Stat(m.artifactDir("mer-5")); err != nil {
+		t.Fatalf("fork artifacts removed with the source: %v", err)
+	}
+}
+
+func TestRetriedForkReforks(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, st, _ := newChatManager(launcher)
+	m.dataDir = t.TempDir()
+	deferred := deferredBackground(m)
+	ws := m.workspace.(*fakeWorkspace)
+	ws.createErr = errors.New("temporary git failure")
+	cfg := asyncChatSpawnConfig("")
+	cfg.Fork = &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc", PrepareChat: func(context.Context, ports.ForkTarget) (string, error) {
+		return "first-fork", nil
+	}}
+	rec, _, _, err := m.Spawn(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	(*deferred)[0]()
+	if st.sessions[rec.ID].ProvisionState != domain.SessionProvisionFailed {
+		t.Fatalf("state = %q", st.sessions[rec.ID].ProvisionState)
+	}
+	m.store = lineageStore{fakeStore: st, forks: map[domain.SessionID]domain.SessionFork{rec.ID: {ForkSessionID: rec.ID, SourceSessionID: "mer-0"}}}
+	var retriedFor domain.SessionID
+	m.SetForkRetrier(func(_ context.Context, fork domain.SessionRecord) (*ports.SpawnFork, error) {
+		retriedFor = fork.ID
+		return &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc", PrepareChat: func(context.Context, ports.ForkTarget) (string, error) {
+			return "second-fork", nil
+		}}, nil
+	})
+	ws.createErr = nil
+	if _, err := m.ResumeAgentWithMode(context.Background(), rec.ID); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	(*deferred)[1]()
+	if retriedFor != rec.ID || len(launcher.started) != 1 || launcher.started[0].ProviderConversationID != "second-fork" {
+		t.Fatalf("retried for %q, started %+v", retriedFor, launcher.started)
+	}
+}
+
+type linkRewriteStore struct {
+	*fakeStore
+	from, to, conversation string
+	copiedFrom, copiedTo   string
+}
+
+func (s *linkRewriteStore) CopyForkMessageContent(_ context.Context, source, fork string) (int, error) {
+	s.copiedFrom, s.copiedTo = source, fork
+	return 1, nil
+}
+
+func (s *linkRewriteStore) ConversationForSession(_ context.Context, id domain.SessionID) (domain.ConversationRecord, error) {
+	return domain.ConversationRecord{ID: "conv-" + string(id)}, nil
+}
+
+func (s *linkRewriteStore) RewriteConversationText(_ context.Context, conversation, from, to string) (int, error) {
+	s.conversation, s.from, s.to = conversation, from, to
+	return 1, nil
+}
+
+func TestForkCopiesAttachmentsAndPointsLinksAtItself(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, st, _ := newChatManager(launcher)
+	m.dataDir = t.TempDir()
+	m.attachments = attachmentstore.New(m.dataDir)
+	store := &linkRewriteStore{fakeStore: st}
+	m.store = store
+	src := filepath.Join(m.dataDir, "attachments", "mer-0")
+	if err := os.MkdirAll(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "attachment-1.png"), []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		RequestedMode: domain.SessionModeChat,
+		Fork: &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc", PrepareChat: func(context.Context, ports.ForkTarget) (string, error) {
+			return "forked", nil
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(m.dataDir, "attachments", string(rec.ID), "attachment-1.png")); err != nil || string(b) != "png" {
+		t.Fatalf("attachment not copied: %q, %v", b, err)
+	}
+	wantFrom := "ao://sessions/" + string(chatTestProject) + "/mer-0/artifacts/"
+	wantTo := "ao://sessions/" + string(chatTestProject) + "/" + string(rec.ID) + "/artifacts/"
+	if store.conversation != "conv-"+string(rec.ID) || store.from != wantFrom || store.to != wantTo {
+		t.Fatalf("rewrite = %q %q -> %q", store.conversation, store.from, store.to)
+	}
+	if store.copiedFrom != "conv-mer-0" || store.copiedTo != "conv-"+string(rec.ID) {
+		t.Fatalf("images copied from %q to %q", store.copiedFrom, store.copiedTo)
+	}
+}
+
+type recordingForkSeeds struct{ applied, deleted []string }
+
+func (r *recordingForkSeeds) Apply(_ context.Context, _ string, ref string) error {
+	r.applied = append(r.applied, ref)
+	return nil
+}
+
+func (*recordingForkSeeds) RecordBase(context.Context, string, string) error { return nil }
+func (*recordingForkSeeds) UnchangedSince(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (*recordingForkSeeds) DiscardChanges(context.Context, string) error { return nil }
+func (r *recordingForkSeeds) Delete(_ context.Context, _ string, ref string) error {
+	r.deleted = append(r.deleted, ref)
+	return nil
+}
+
+func TestForkKeepsABorrowedSnapshot(t *testing.T) {
+	m, st, _, repo := newGitTaskPreparationManager(t)
+	src := forkSourceWorktree(t, repo)
+	head, _ := captureForkSeed(t, src)
+	seeds := &recordingForkSeeds{}
+	m.forkSeeds = seeds
+	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Fork: &ports.SpawnFork{StartPoint: head, SeedRef: "refs/ao/snapshots/mer-0/turn-3", KeepSeedRef: true}}
+	if _, _, err := m.createSessionWorkspace(context.Background(), st.projects["mer"], cfg, "mer-1", "ao/mer-1/root", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(seeds.applied) != 1 || len(seeds.deleted) != 0 {
+		t.Fatalf("applied %v, deleted %v", seeds.applied, seeds.deleted)
+	}
+}
+
+type artifactVersionStore struct {
+	*fakeStore
+	versions map[string][]domain.SessionArtifactVersion
+}
+
+func (s artifactVersionStore) ListSessionArtifactVersions(_ context.Context, _ domain.SessionID, path string) ([]domain.SessionArtifactVersion, error) {
+	return s.versions[path], nil
+}
+
+func writeArtifactBlob(t *testing.T, dir, content string) string {
+	t.Helper()
+	sum := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	path := filepath.Join(dir, ".versions", "blobs", sum[:2], sum)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return sum
+}
+
+func TestOlderTurnForkGetsThatTurnsArtifacts(t *testing.T) {
+	m, st, _, _ := newManager()
+	m.dataDir = t.TempDir()
+	src := m.artifactDir("mer-0")
+	cutoff := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	before, after := cutoff.Add(-time.Minute), cutoff.Add(time.Minute)
+	writeTestFile(t, filepath.Join(src, "report.md"), "report v2")
+	writeTestFile(t, filepath.Join(src, "notes", "todo.md"), "created later")
+	writeTestFile(t, filepath.Join(src, "plain.txt"), "never versioned")
+	if err := os.Chtimes(filepath.Join(src, "plain.txt"), before, before); err != nil {
+		t.Fatal(err)
+	}
+	v1 := writeArtifactBlob(t, src, "report v1")
+	v2 := writeArtifactBlob(t, src, "report v2")
+	todo := writeArtifactBlob(t, src, "created later")
+	m.store = artifactVersionStore{fakeStore: st, versions: map[string][]domain.SessionArtifactVersion{
+		"report.md":     {{Path: "report.md", Version: 1, SHA256: v1, ModTime: before}, {Path: "report.md", Version: 2, SHA256: v2, ModTime: after}},
+		"notes/todo.md": {{Path: "notes/todo.md", Version: 1, SHA256: todo, ModTime: after}},
+	}}
+	dst := t.TempDir()
+	m.copyForkArtifactsAsOf("mer-0", dst, cutoff)
+	if b, _ := os.ReadFile(filepath.Join(dst, "report.md")); string(b) != "report v1" {
+		t.Fatalf("report.md = %q, want the version from that turn", b)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "notes", "todo.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a file created after the turn must not be copied")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dst, "plain.txt")); string(b) != "never versioned" {
+		t.Fatalf("plain.txt = %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".versions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the version store must not be copied")
+	}
+}
+
+func TestLatestTurnForkSkipsTheVersionStore(t *testing.T) {
+	m, _, _, _ := newManager()
+	m.dataDir = t.TempDir()
+	src := m.artifactDir("mer-0")
+	writeTestFile(t, filepath.Join(src, "report.md"), "current")
+	writeArtifactBlob(t, src, "current")
+	dst := t.TempDir()
+	m.copyForkArtifacts("mer-0", dst)
+	if b, _ := os.ReadFile(filepath.Join(dst, "report.md")); string(b) != "current" {
+		t.Fatalf("report.md = %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".versions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the version store must not be copied")
+	}
+}
+
+func inheritedForkFixture(t *testing.T, sourceTerminated bool) (*Manager, domain.SessionRecord, ports.WorkspaceInfo) {
+	t.Helper()
+	m, st, _, repo := newGitTaskPreparationManager(t)
+	src := forkSourceWorktree(t, repo)
+	head, ref := captureForkSeed(t, src)
+	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Fork: &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: head, SeedRef: ref}}
+	ws, _, err := m.createSessionWorkspace(context.Background(), st.projects["mer"], cfg, "mer-1", "ao/mer-1/root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.sessions["mer-0"] = domain.SessionRecord{ID: "mer-0", ProjectID: "mer", IsTerminated: sourceTerminated, Metadata: domain.SessionMetadata{WorkspacePath: src}}
+	fork := domain.SessionRecord{ID: "mer-1", ProjectID: "mer", IsTerminated: true, Metadata: domain.SessionMetadata{WorkspacePath: ws.Path}}
+	st.sessions["mer-1"] = fork
+	m.store = lineageStore{fakeStore: st, forks: map[domain.SessionID]domain.SessionFork{"mer-1": {ForkSessionID: "mer-1", SourceSessionID: "mer-0"}}}
+	return m, fork, ws
+}
+
+func TestUnchangedForkDropsInheritedChanges(t *testing.T) {
+	m, fork, ws := inheritedForkFixture(t, false)
+	if status := runManagerGit(t, ws.Path, "status", "--porcelain"); strings.TrimSpace(status) == "" {
+		t.Fatal("the fork should start with the original's uncommitted files")
+	}
+	if !m.dropInheritedForkChanges(context.Background(), fork, ws) {
+		t.Fatal("an unchanged fork of a live original should drop its inherited changes")
+	}
+	if status := runManagerGit(t, ws.Path, "status", "--porcelain"); strings.TrimSpace(status) != "" {
+		t.Fatalf("worktree still dirty: %q", status)
+	}
+}
+
+func TestChangedForkKeepsItsWork(t *testing.T) {
+	m, fork, ws := inheritedForkFixture(t, false)
+	if err := os.WriteFile(filepath.Join(ws.Path, "fork-work.txt"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if m.dropInheritedForkChanges(context.Background(), fork, ws) {
+		t.Fatal("a fork with its own changes must be kept")
+	}
+	if _, err := os.Stat(filepath.Join(ws.Path, "fork-work.txt")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestForkOfAnArchivedOriginalKeepsItsFiles(t *testing.T) {
+	m, fork, ws := inheritedForkFixture(t, true)
+	if m.dropInheritedForkChanges(context.Background(), fork, ws) {
+		t.Fatal("with the original archived, the fork may hold the only copy of those changes")
+	}
+}
+
+func TestCleanupRemovesAnUnchangedForksWorktree(t *testing.T) {
+	m, fork, ws := inheritedForkFixture(t, false)
+	if _, refusal := m.cleanupOne(context.Background(), fork, ws); refusal.refused() {
+		t.Fatalf("cleanup refused: %+v", refusal)
+	}
+	if _, err := os.Stat(ws.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree still on disk: %v", err)
+	}
+}
+
+func TestCleanupKeepsAChangedForksWorktree(t *testing.T) {
+	m, fork, ws := inheritedForkFixture(t, false)
+	if err := os.WriteFile(filepath.Join(ws.Path, "fork-work.txt"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, refusal := m.cleanupOne(context.Background(), fork, ws); !refusal.refused() {
+		t.Fatal("a fork with its own uncommitted work must be kept")
+	}
+	if _, err := os.Stat(filepath.Join(ws.Path, "fork-work.txt")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArchivingAnUnchangedForkRemovesItsWorktree(t *testing.T) {
+	m, fork, ws := inheritedForkFixture(t, false)
+	st := m.store.(lineageStore).fakeStore
+	fork.IsTerminated = false
+	st.sessions[fork.ID] = fork
+	if _, err := m.Kill(context.Background(), fork.ID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if _, err := os.Stat(ws.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree still on disk after archiving: %v", err)
+	}
+}
+
+func TestForkFallsBackToTheDefaultModelWhenTheOriginalsIsRejected(t *testing.T) {
+	m, _, _, _ := newManager()
+	m.modelCatalog = tuningCatalog{catalog: ports.AgentModelCatalog{Models: []ports.AgentModelInfo{
+		{ID: "claude-opus-5-5", IsDefault: true},
+	}}}
+	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode, AgentConfig: ports.AgentConfig{Model: "opus"}}
+	if _, err := m.resolveAgentConfig(context.Background(), cfg, domain.ProjectConfig{}); !errors.Is(err, ErrUnsupportedModel) {
+		t.Fatalf("a normal session keeps the strict check: %v", err)
+	}
+	cfg.Fork = &ports.SpawnFork{SourceSessionID: "mer-0"}
+	resolved, err := m.resolveAgentConfig(context.Background(), cfg, domain.ProjectConfig{})
+	if err != nil {
+		t.Fatalf("a fork should fall back to the default model: %v", err)
+	}
+	if resolved.Model != "" && resolved.Model != "claude-opus-5-5" {
+		t.Fatalf("model = %q", resolved.Model)
+	}
+}
+
+func TestChatTextHandoffForkStartsWithTheNote(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, _, _ := newChatManager(launcher)
+	rec, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		RequestedMode: domain.SessionModeChat,
+		Fork: &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc", Handoff: func(_ context.Context, got ports.ForkTarget) (string, error) {
+			if got.WorkspacePath == "" {
+				t.Errorf("target = %+v, want the fork's worktree", got)
+			}
+			return "COPIED-CONVERSATION", nil
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if len(launcher.started) != 1 {
+		t.Fatalf("started = %+v", launcher.started)
+	}
+	started := launcher.started[0]
+	if started.ForkHandoffNote != "COPIED-CONVERSATION" || started.ProviderConversationID != "" {
+		t.Fatalf("started = %+v, want a fresh agent with the copied conversation", started)
+	}
+	if rec.Metadata.Prompt != "" {
+		t.Fatalf("task = %q, the note must not be saved as the task", rec.Metadata.Prompt)
+	}
+}

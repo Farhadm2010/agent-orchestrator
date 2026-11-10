@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -244,4 +245,46 @@ func gitOutputIn(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// With session forks on, every turn is snapshotted so a fork of an older turn
+// can start from that turn's files, even where rollback can't use them.
+func TestForksSnapshotTurnsForAnAgentThatCannotRollBack(t *testing.T) {
+	chatsvc.EnableForkSnapshots(true)
+	t.Cleanup(func() { chatsvc.EnableForkSnapshots(false) })
+	workspace := gitWorkspace(t)
+	h := newGitHarness(t, nil, workspace)
+
+	completeTurn(t, h, "only", "provider-turn-1")
+	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool { return len(s.Messages) == 2 })
+
+	if refs := gitOutputIn(t, workspace, "for-each-ref", "refs/ao/snapshots/"); refs == "" {
+		t.Fatal("no snapshot was saved for the turn")
+	}
+}
+
+// With session forks on, a turn start also keeps the session's artifacts as
+// they are, so a fork of an older turn can copy them as they were.
+func TestForksKeepArtifactsAtEachTurnStart(t *testing.T) {
+	chatsvc.EnableForkSnapshots(true)
+	var mu sync.Mutex
+	var kept []domain.SessionID
+	chatsvc.SetTurnArtifactSnapshot(func(_ context.Context, id domain.SessionID) {
+		mu.Lock()
+		defer mu.Unlock()
+		kept = append(kept, id)
+	})
+	t.Cleanup(func() {
+		chatsvc.EnableForkSnapshots(false)
+		chatsvc.SetTurnArtifactSnapshot(nil)
+	})
+	workspace := gitWorkspace(t)
+	h := newGitHarness(t, nil, workspace)
+	completeTurn(t, h, "only", "provider-turn-1")
+	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool { return len(s.Messages) == 2 })
+	mu.Lock()
+	defer mu.Unlock()
+	if len(kept) == 0 || kept[0] != testSession {
+		t.Fatalf("artifacts kept for %v", kept)
+	}
 }

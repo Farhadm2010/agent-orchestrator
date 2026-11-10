@@ -25,6 +25,8 @@ import (
 
 // APIDeps bundles every service the API layer's controllers depend on.
 type APIDeps struct {
+	// SessionForks serves the experimental fork routes. Nil refuses them.
+	SessionForks       controllers.SessionForkService
 	UsageFlush         func(context.Context)
 	Awake              controllers.AwakeService
 	Agents             controllers.AgentCatalog
@@ -143,6 +145,7 @@ type API struct {
 	agentAccounts *controllers.AgentAccountsController
 	projects      *controllers.ProjectsController
 	sessions      *controllers.SessionsController
+	sessionForks  *controllers.SessionForksController
 	automations   *controllers.AutomationsController
 	desktop       *controllers.DesktopWorkspaceController
 	usage         *controllers.UsageController
@@ -193,6 +196,7 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 		projects: &controllers.ProjectsController{
 			Mgr: deps.Projects,
 		},
+		sessionForks: &controllers.SessionForksController{Svc: deps.SessionForks},
 		sessions: &controllers.SessionsController{
 			Svc:                      deps.Sessions,
 			Projects:                 deps.Projects,
@@ -339,6 +343,7 @@ func (a *API) Register(root chi.Router) {
 			a.agentAccounts.Register(r)
 			a.projects.Register(r)
 			a.sessions.Register(r)
+			a.sessionForks.Register(r)
 			a.automations.Register(r)
 			a.desktop.Register(r)
 			a.usage.Register(r)

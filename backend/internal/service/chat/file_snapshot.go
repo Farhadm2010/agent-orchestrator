@@ -5,12 +5,35 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/filesnapshot"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
+
+// forkSnapshots makes every turn save a snapshot, not just turns of agents
+// that can roll back: a session fork of an older turn starts from it. It is
+// on while session forks are enabled.
+var forkSnapshots atomic.Bool
+
+// EnableForkSnapshots turns on a snapshot before every turn, for session forks.
+func EnableForkSnapshots(enabled bool) { forkSnapshots.Store(enabled) }
+
+// turnArtifactSnapshot keeps a session's artifacts as they are when a turn
+// starts, next to the files snapshot, so a fork of an older turn can copy them.
+var turnArtifactSnapshot atomic.Pointer[func(context.Context, domain.SessionID)]
+
+// SetTurnArtifactSnapshot wires the artifact snapshot taken as each turn starts
+// while session forks are on. Nil turns it off.
+func SetTurnArtifactSnapshot(snapshot func(context.Context, domain.SessionID)) {
+	if snapshot == nil {
+		turnArtifactSnapshot.Store(nil)
+		return
+	}
+	turnArtifactSnapshot.Store(&snapshot)
+}
 
 // fileSnapshotBudget bounds the snapshot taken before each turn. The turn waits
 // for it, so a repository too large to snapshot in time costs that turn its file
@@ -113,7 +136,11 @@ func planFileRestore(ctx context.Context, workspace string, session domain.Sessi
 // gets one, and a failure never holds the turn: it only means that turn's
 // rollback cannot restore files.
 func (c *Controller) snapshotFiles(ctx context.Context, turnIDs []string) {
-	if _, ok := c.conv.(ports.ChatRollbacker); !ok || c.workspacePath == "" || c.reviewID != "" {
+	if snapshot := turnArtifactSnapshot.Load(); snapshot != nil && forkSnapshots.Load() && c.reviewID == "" {
+		(*snapshot)(ctx, c.sessionID)
+	}
+	_, rollsBack := c.conv.(ports.ChatRollbacker)
+	if (!rollsBack && !forkSnapshots.Load()) || c.workspacePath == "" || c.reviewID != "" {
 		return
 	}
 	refs := make([]string, len(turnIDs))

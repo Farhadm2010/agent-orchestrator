@@ -707,6 +707,16 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 	if err != nil {
 		return nil, fmt.Errorf("load active conversation branch: %w", err)
 	}
+	if note := strings.TrimSpace(cfg.ForkHandoffNote); note != "" && cfg.ProviderSwitch == nil && activeBranch.HandoffNote == "" {
+		keeper, ok := s.store.(forkHandoffNoteKeeper)
+		if !ok {
+			return nil, errors.New("chat start: store can't keep a fork's copied conversation")
+		}
+		if err := keeper.SetConversationBranchHandoffNote(ctx, conversation.ID, activeBranch.ID, note); err != nil {
+			return nil, fmt.Errorf("keep fork's copied conversation: %w", err)
+		}
+		activeBranch.HandoffNote = note
+	}
 	providerScopeID := activeBranch.ProviderScopeID
 	providerHandleOwnedByActiveBranch := true
 	if cfg.ProviderScopeID != "" {
@@ -2481,6 +2491,12 @@ func (s *Service) rebindBranchOnReady(
 
 // withHandoffNote adds a switch's handoff note to the agent's system prompt. A
 // branch keeps its note for life, so every launch on it passes the note again.
+// forkHandoffNoteKeeper stores the note a text-handoff fork's agent starts
+// with on the branch it runs on.
+type forkHandoffNoteKeeper interface {
+	SetConversationBranchHandoffNote(ctx context.Context, conversationID, branchID, note string) error
+}
+
 func withHandoffNote(systemPrompt, note string) string {
 	if note == "" {
 		return systemPrompt

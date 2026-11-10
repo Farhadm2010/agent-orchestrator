@@ -4562,5 +4562,17 @@
 	"chat.find.wrappedFirst": "Возврат к первому совпадению.",
 	"chat.find.wrappedLast": "Переход к последнему совпадению.",
 	"chat.find.notRevealed": "Не удалось показать это совпадение. Повторите поиск.",
-	"shortcut.find-in-chat": "Найти в чате"
+	"shortcut.find-in-chat": "Найти в чате",
+	"sessionFork.fork": "Ответвить",
+	"sessionFork.tooltip": "Ответвить этот сеанс в новый",
+	"sessionFork.forking": "Ответвление…",
+	"sessionFork.forkedFrom": "Ответвлено от {{title}}",
+	"sessionFork.unavailable": "Параметры ответвления недоступны",
+	"sessionFork.failed": "Не удалось ответвить этот сеанс",
+	"sessionFork.sectionTitle": "Ответвления",
+	"sessionFork.originalPRs": "PR оригинала",
+	"sessionFork.originalPR": "PR #{{number}} оригинала",
+	"sessionFork.forkSession": "Ответвить сеанс",
+	"sessionFork.textCopy": "Разговор скопирован как текст",
+	"sessionFork.textCopyNotice": "Ответвление от {{title}}. Этот агент не умеет копировать собственный разговор, поэтому получил разговор оригинала в виде текста."
 }

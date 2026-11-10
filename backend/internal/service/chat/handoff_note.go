@@ -16,6 +16,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/sessionfork"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 )
 
@@ -131,6 +132,29 @@ func (s *Service) HandoffNote(ctx context.Context, record domain.SessionRecord, 
 		return "", err
 	}
 	input.ChangedFiles = handoffChangedFiles(ctx, record.Metadata.WorkspacePath, record.Metadata.DiffBaseSHA)
+	return domain.BuildHandoffNote(input), nil
+}
+
+// ForkHandoffNote builds the note a text-handoff fork's fresh agent starts
+// with: source's conversation as AO recorded it, pointed at the fork's own
+// worktree and artifact folder. terminalOutput is the end of source's
+// terminal screen, for a terminal session.
+func (s *Service) ForkHandoffNote(ctx context.Context, source domain.SessionRecord, target ports.ForkTarget, terminalOutput string) (string, error) {
+	input, err := s.handoffNoteInput(ctx, source, source.Harness, "")
+	if err != nil {
+		return "", err
+	}
+	input.Fork = &domain.HandoffFork{SourceSessionID: source.ID, SourceTitle: sessionfork.Title(source)}
+	// The fork's own name, worktree, and branch are in its standing
+	// instructions; the original's would send it to the wrong place.
+	input.SessionTitle, input.Branch = "", ""
+	input.WorkspacePath = target.WorkspacePath
+	if target.SessionID != "" {
+		input.ArtifactDir = filepath.ToSlash(sessionartifacts.Dir(s.dataDir, target.SessionID))
+	}
+	input.TerminalOutput = terminalOutput
+	// The fork starts with the same uncommitted changes.
+	input.ChangedFiles = handoffChangedFiles(ctx, source.Metadata.WorkspacePath, source.Metadata.DiffBaseSHA)
 	return domain.BuildHandoffNote(input), nil
 }
 
