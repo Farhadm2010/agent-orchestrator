@@ -179,7 +179,7 @@ import { ChatTokenSkills } from "./sentComposerTokens";
 import { ChatComposer, type ChatComposerHandle, type StoredComposerAttachment } from "./ChatComposer";
 import { ContextMeter } from "./ContextMeter";
 import { stagedAttachmentParts, attachmentName } from "./messageAttachments";
-import type { QueuedMessageEditOptions } from "../../types/conversation";
+import type { BatchedDelivery, QueuedMessageEditOptions } from "../../types/conversation";
 import { QueuedMessageDock, type QueuedMessage } from "./QueuedMessageDock";
 import { SessionStartup } from "./SessionStartup";
 import { ActivityRun } from "./ActivityRun";
@@ -3943,7 +3943,7 @@ export function Timeline({
 		// An AO action outlives a rolled-back or hidden turn, so it stands on its own there.
 		const dropped = new Set([...hiddenTurns, ...snapshot.turns.filter((turn) => turn.rolledBack).map((turn) => turn.id)]);
 		const items = dropped.size > 0 ? timelineItems.map((item) => outlivingAction(item, dropped)) : timelineItems;
-		const groups = groupByTurn({ ...snapshot, items })
+		const groups = groupByTurn({ ...snapshot, items }, drainedInto(snapshot.batchedDeliveries, batchedReports.moved))
 			.filter((group) => !group.turnId || !hiddenTurns.has(group.turnId))
 			.map((group, index) => openingPending && (firstTurn ? group.turnId === firstTurn.id : index === 0 && group.turnId?.startsWith("local:"))
 				? { ...group, live: true, liveStartedAt: openingStartedAt, liveStartupLabel: openingStartupLabel }
@@ -6120,6 +6120,25 @@ function firstTurnSettled(snapshot: ConversationSnapshot): boolean {
 }
 
 /**
+ * Queued turns AO drained into another turn's starting input, by the turn they
+ * joined. Their messages were that turn's prompt, so they draw above its work and
+ * reply rather than below it, where their own later sequence would put them. A
+ * steer keeps its place mid-turn, and a report already drawn under a message
+ * (`moved`) is left to that message.
+ */
+function drainedInto(
+	deliveries: readonly BatchedDelivery[] | undefined,
+	moved: ReadonlySet<string>,
+): ReadonlyMap<string, string> {
+	const joined = new Map<string, string>();
+	for (const delivery of deliveries ?? []) {
+		if (delivery.steerActivityId || moved.has(delivery.turnId)) continue;
+		joined.set(delivery.turnId, delivery.deliveredWithTurnId);
+	}
+	return joined;
+}
+
+/**
  * Group items by the turn that produced them, so a completed turn can be closed
  * off with its outcome.
  *
@@ -6136,13 +6155,14 @@ function firstTurnSettled(snapshot: ConversationSnapshot): boolean {
  * Items with no turn (an automation relay that arrived between turns) form their
  * own group and keep their sequence position.
  */
-function groupByTurn(snapshot: ConversationSnapshot): TimelineGroup[] {
+function groupByTurn(snapshot: ConversationSnapshot, joinedTurns: ReadonlyMap<string, string> = new Map()): TimelineGroup[] {
 	const byTurn = new Map(snapshot.turns.map((turn) => [turn.id, turn]));
 	const groups: TimelineGroup[] = [];
 	const groupForTurn = new Map<string, TimelineGroup>();
 
 	for (const item of snapshot.items) {
-		if (item.turnId === undefined) {
+		const turnId = item.turnId === undefined ? undefined : joinedTurns.get(item.turnId) ?? item.turnId;
+		if (turnId === undefined) {
 			// Consecutive turn-less items share one group rather than getting one each.
 			// A provider can run a turn AO never dispatched — a compaction, or a turn
 			// resumed inside the provider's own history — and every item it emits then
@@ -6163,20 +6183,20 @@ function groupByTurn(snapshot: ConversationSnapshot): TimelineGroup[] {
 			});
 			continue;
 		}
-		const existing = groupForTurn.get(item.turnId);
+		const existing = groupForTurn.get(turnId);
 		if (existing) {
 			existing.items.push(item);
 			continue;
 		}
 		const group: TimelineGroup = {
 			// A turn opened by a keyed human message keeps the key its echo had.
-			key: itemKey(item) === item.id ? byTurn.get(item.turnId)?.groupKey ?? `${item.turnId}-${item.sequence}` : itemKey(item),
-			turnId: item.turnId,
+			key: itemKey(item) === item.id ? byTurn.get(turnId)?.groupKey ?? `${turnId}-${item.sequence}` : itemKey(item),
+			turnId,
 			// A turn that began above the loaded history sorts where it began.
-			anchor: byTurn.get(item.turnId)?.anchorSequence ?? item.sequence,
+			anchor: byTurn.get(turnId)?.anchorSequence ?? item.sequence,
 			items: [item],
 		};
-		groupForTurn.set(item.turnId, group);
+		groupForTurn.set(turnId, group);
 		groups.push(group);
 	}
 
