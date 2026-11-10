@@ -14,41 +14,22 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/sessionsearch"
-	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
-	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 )
 
 // The search benchmark measures ranking quality with standard retrieval metrics
 // and fails when the shipped ranking regresses below its recorded baseline.
 //
-// Three suites:
+// Its corpus is hand-written AO sessions with commands, error output,
+// identifiers and touched paths, queried the way people and agents search for
+// them. It needs no download, so it runs in every `go test`.
 //
-//   - agentic: hand-written AO sessions with commands, error output, identifiers
-//     and touched paths, queried the way people and agents search for them.
-//     It needs no download, so it runs in every `go test`.
-//   - longmemeval: LongMemEval-S (Wu et al., ICLR 2025), 470 answerable
-//     questions, each over its own haystack of ~48 user/assistant sessions.
-//     https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned
-//   - locomo: LoCoMo (Maharana et al., ACL 2024), 10 long two-person
-//     conversations, 1,536 questions with turn-level evidence (category 5,
-//     adversarial, has none and is excluded as in every published number).
-//     https://github.com/snap-research/locomo
+// Everything runs through the shipped path: sessions are indexed into a real
+// migrated SQLite store, queries are parsed by
+// domain.ParseSessionSearchQueryWith and answered by Service.Search. The
+// corpus is indexed once and every variant queries it:
 //
-// The public suites are retrieval-over-past-sessions tasks with published BM25
-// numbers to compare against. They are large and not vendored, so they skip
-// unless pointed at a local copy. scripts/search-benchmark.sh downloads,
-// verifies and runs them:
-//
-//	scripts/search-benchmark.sh            # quick: agentic + locomo + 100 longmemeval
-//	scripts/search-benchmark.sh full       # every question
-//	scripts/search-benchmark.sh ablate     # every variant, side by side
-//	scripts/search-benchmark.sh --update   # record the current numbers as the baseline
-//
-// Everything runs through the shipped path: sessions are indexed by
-// Service.IndexChat into a real migrated SQLite store, queries are parsed by
-// domain.ParseSessionSearchQueryWith and answered by Service.Search. Each corpus
-// is indexed once and every variant queries it, so an ablation costs about as
-// much as a single run.
+//	AO_SEARCH_BENCH_VARIANTS=all go test ./internal/service/sessionsearch/ -run TestSearchBenchmarkAgentic -v
+//	AO_SEARCH_BENCH_UPDATE=1 go test ./internal/service/sessionsearch/ -run TestSearchBenchmarkAgentic   # record a new baseline
 
 // benchVariant is one ranking configuration. "shipped" is the zero value: the
 // options exist so the alternatives are measured through the real code.
@@ -133,14 +114,12 @@ type benchQuestion struct {
 	category string
 	text     string
 	sessions map[string]bool // sessions that hold the evidence
-	turns    map[string]bool // turns (message ids) that hold the evidence
 }
 
 // benchMetrics accumulates the standard retrieval metrics: recall@k (a question
-// is a hit if any relevant item is in the top k, i.e. recall_any as LongMemEval
-// reports it), nDCG@10 with binary relevance, and MRR. Session metrics read the
-// grouped result list, one row per session, as the product shows it; turn
-// metrics read the per-message list.
+// is a hit if any relevant session is in the top k), nDCG@10 with binary
+// relevance, and MRR. They read the grouped result list, one row per session,
+// as the product shows it.
 type benchMetrics struct {
 	N             int     `json:"n"`
 	SessionR1     float64 `json:"session_r1"`
@@ -148,18 +127,14 @@ type benchMetrics struct {
 	SessionR10    float64 `json:"session_r10"`
 	SessionNDCG10 float64 `json:"session_ndcg10"`
 	SessionMRR    float64 `json:"session_mrr"`
-	TurnN         int     `json:"turn_n"`
-	TurnR5        float64 `json:"turn_r5"`
-	TurnR10       float64 `json:"turn_r10"`
-	TurnMRR       float64 `json:"turn_mrr"`
 	Empty         float64 `json:"empty"`
 
 	categories map[string]*benchMetrics
 	finished   bool
 }
 
-func (m *benchMetrics) add(q benchQuestion, sessions, turns []string) {
-	m.addOne(q, sessions, turns)
+func (m *benchMetrics) add(q benchQuestion, sessions []string) {
+	m.addOne(q, sessions)
 	if m.categories == nil {
 		m.categories = map[string]*benchMetrics{}
 	}
@@ -171,10 +146,10 @@ func (m *benchMetrics) add(q benchQuestion, sessions, turns []string) {
 		sub = &benchMetrics{}
 		m.categories[q.category] = sub
 	}
-	sub.addOne(q, sessions, turns)
+	sub.addOne(q, sessions)
 }
 
-func (m *benchMetrics) addOne(q benchQuestion, sessions, turns []string) {
+func (m *benchMetrics) addOne(q benchQuestion, sessions []string) {
 	m.N++
 	if len(sessions) == 0 {
 		m.Empty++
@@ -203,18 +178,6 @@ func (m *benchMetrics) addOne(q benchQuestion, sessions, turns []string) {
 		m.SessionR1 += boolScore(first < 1)
 		m.SessionR5 += boolScore(first < 5)
 		m.SessionR10 += boolScore(first < 10)
-	}
-	if len(q.turns) == 0 {
-		return
-	}
-	m.TurnN++
-	for index, id := range turns {
-		if q.turns[id] {
-			m.TurnMRR += 1 / float64(index+1)
-			m.TurnR5 += boolScore(index < 5)
-			m.TurnR10 += boolScore(index < 10)
-			break
-		}
 	}
 }
 
@@ -246,7 +209,6 @@ func (m *benchMetrics) finish() {
 	}
 	m.SessionR1, m.SessionR5, m.SessionR10 = pct(m.SessionR1, m.N), pct(m.SessionR5, m.N), pct(m.SessionR10, m.N)
 	m.SessionNDCG10, m.SessionMRR = pct(m.SessionNDCG10, m.N), mean(m.SessionMRR, m.N)
-	m.TurnR5, m.TurnR10, m.TurnMRR = pct(m.TurnR5, m.TurnN), pct(m.TurnR10, m.TurnN), mean(m.TurnMRR, m.TurnN)
 	m.Empty = pct(m.Empty, m.N)
 	for _, sub := range m.categories {
 		sub.finish()
@@ -254,12 +216,8 @@ func (m *benchMetrics) finish() {
 }
 
 func (m *benchMetrics) line() string {
-	turn := "turn       n/a"
-	if m.TurnN > 0 {
-		turn = fmt.Sprintf("turn R@5 %5.1f R@10 %5.1f MRR %.3f", m.TurnR5, m.TurnR10, m.TurnMRR)
-	}
-	return fmt.Sprintf("n=%-4d session R@1 %5.1f R@5 %5.1f R@10 %5.1f nDCG@10 %5.1f MRR %.3f | %s | empty %4.1f",
-		m.N, m.SessionR1, m.SessionR5, m.SessionR10, m.SessionNDCG10, m.SessionMRR, turn, m.Empty)
+	return fmt.Sprintf("n=%-4d session R@1 %5.1f R@5 %5.1f R@10 %5.1f nDCG@10 %5.1f MRR %.3f | empty %4.1f",
+		m.N, m.SessionR1, m.SessionR5, m.SessionR10, m.SessionNDCG10, m.SessionMRR, m.Empty)
 }
 
 // benchRun is one suite's results for every selected variant.
@@ -275,40 +233,6 @@ func newBenchRun(suite string, variants []benchVariant) *benchRun {
 		run.metrics[variant.name] = &benchMetrics{}
 	}
 	return run
-}
-
-// ask runs one question through every variant. prefix strips the per-corpus
-// session-id prefix so results compare against the dataset's own ids.
-func (r *benchRun) ask(t *testing.T, svc *sessionsearch.Service, prefix string, q benchQuestion, params domain.SessionSearchParams) {
-	for _, variant := range r.variants {
-		parsed := domain.ParseSessionSearchQueryWith(q.text, variant.match)
-		grouped := params
-		grouped.Limit, grouped.Ranking, grouped.Group = domain.SessionSearchMaxLimit, variant.ranking, domain.SessionSearchGroupSession
-		grouped.SkipSnippets = true
-		sessionResponse, err := svc.Search(context.Background(), parsed, grouped)
-		if err != nil {
-			t.Fatalf("[%s] search %q: %v", variant.name, q.text, err)
-		}
-		sessions := make([]string, 0, len(sessionResponse.Results))
-		for _, result := range sessionResponse.Results {
-			sessions = append(sessions, strings.TrimPrefix(result.SessionID, prefix))
-		}
-		var turns []string
-		if len(q.turns) > 0 {
-			perMessage := grouped
-			perMessage.Group = domain.SessionSearchGroupMessage
-			messageResponse, err := svc.Search(context.Background(), parsed, perMessage)
-			if err != nil {
-				t.Fatalf("[%s] search %q: %v", variant.name, q.text, err)
-			}
-			for _, result := range messageResponse.Results {
-				if result.MessageID != "" {
-					turns = append(turns, result.MessageID)
-				}
-			}
-		}
-		r.metrics[variant.name].add(q, sessions, turns)
-	}
 }
 
 // report logs every variant, then checks the shipped variant against the
@@ -356,7 +280,7 @@ func checkBaseline(t *testing.T, key string, current *benchMetrics) {
 	}
 	if os.Getenv("AO_SEARCH_BENCH_UPDATE") == "1" {
 		baseline.Note = "Recorded by the search benchmark (search_benchmark_test.go). " +
-			"Regenerate with scripts/search-benchmark.sh --update after an intentional ranking change."
+			"Regenerate with AO_SEARCH_BENCH_UPDATE=1 after an intentional ranking change."
 		if baseline.Suites == nil {
 			baseline.Suites = map[string]*benchMetrics{}
 		}
@@ -379,10 +303,11 @@ func checkBaseline(t *testing.T, key string, current *benchMetrics) {
 		t.Fatalf("no baseline for %s; record one with AO_SEARCH_BENCH_UPDATE=1", key)
 	}
 	if want.N != current.N {
-		t.Fatalf("%s: baseline has n=%d, this run n=%d; the dataset or filter changed", key, want.N, current.N)
+		t.Fatalf("%s: baseline has n=%d, this run n=%d; the queries changed", key, want.N, current.N)
 	}
-	// Recall and nDCG are percentages; half a point is one LoCoMo question in
-	// 300 and leaves room for nothing but noise. MRR moves on a 0-1 scale.
+	// Recall and nDCG are percentages; with 43 queries one of them is 2.3
+	// points, so half a point allows no query to be lost. MRR moves on a 0-1
+	// scale.
 	checks := []struct {
 		name          string
 		got, baseline float64
@@ -393,9 +318,6 @@ func checkBaseline(t *testing.T, key string, current *benchMetrics) {
 		{"session R@10", current.SessionR10, want.SessionR10, 0.5},
 		{"session nDCG@10", current.SessionNDCG10, want.SessionNDCG10, 0.5},
 		{"session MRR", current.SessionMRR, want.SessionMRR, 0.005},
-		{"turn R@5", current.TurnR5, want.TurnR5, 0.5},
-		{"turn R@10", current.TurnR10, want.TurnR10, 0.5},
-		{"turn MRR", current.TurnMRR, want.TurnMRR, 0.005},
 	}
 	for _, check := range checks {
 		if check.got < check.baseline-check.tolerance {
@@ -409,268 +331,8 @@ func checkBaseline(t *testing.T, key string, current *benchMetrics) {
 }
 
 // ---------------------------------------------------------------------------
-// Public suites: a corpus is loaded per question (LongMemEval) or per
-// conversation (LoCoMo) into one store that is cleared between corpora, so
-// bm25's collection statistics are those of that corpus alone, as the
-// benchmarks define them.
-
-// corpusStore is the real SQLite store with the Chat timeline served from
-// memory. Every index write and every query goes to SQLite unchanged.
-type corpusStore struct {
-	*sqlite.Store
-	messages map[string][]domain.SessionSearchMessage
-}
-
-func (s *corpusStore) SessionSearchVisibleMessages(_ context.Context, conversationID string) ([]domain.SessionSearchMessage, error) {
-	return s.messages[conversationID], nil
-}
-
-func (s *corpusStore) SessionSearchActivities(context.Context, string) ([]domain.SessionSearchActivity, error) {
-	return nil, nil
-}
-
-func (s *corpusStore) SessionSearchTouchedPaths(context.Context, string) ([]string, error) {
-	return nil, nil
-}
-
-type corpusSessionText struct {
-	id    string
-	at    time.Time
-	turns []corpusTurn
-}
-
-type corpusTurn struct {
-	id   string
-	user bool
-	text string
-}
-
-type corpusLoader struct {
-	store   *corpusStore
-	svc     *sessionsearch.Service
-	indexed []string
-	run     int
-}
-
-func newCorpusLoader(t *testing.T) *corpusLoader {
-	store := &corpusStore{Store: sqlitetest.MustOpen(t), messages: map[string][]domain.SessionSearchMessage{}}
-	return &corpusLoader{store: store, svc: sessionsearch.New(sessionsearch.Options{
-		Store: store, Machine: "bench", Now: func() time.Time { return testNow },
-	})}
-}
-
-// load replaces the index with one corpus and returns the session-id prefix.
-// Ids are made unique per corpus because LongMemEval haystacks share sessions,
-// and an unchanged fingerprint would (correctly) skip re-indexing them.
-func (l *corpusLoader) load(t *testing.T, sessions []corpusSessionText) string {
-	ctx := context.Background()
-	for _, key := range l.indexed {
-		if err := l.store.DeleteSessionSearchDocsForSource(ctx, key); err != nil {
-			t.Fatalf("clear %s: %v", key, err)
-		}
-	}
-	l.indexed = l.indexed[:0]
-	clear(l.store.messages)
-	l.run++
-	prefix := fmt.Sprintf("c%d~", l.run)
-	for _, session := range sessions {
-		sessionID := prefix + session.id
-		messages := make([]domain.SessionSearchMessage, 0, len(session.turns))
-		for index, turn := range session.turns {
-			role := domain.MessageRoleAssistant
-			if turn.user {
-				role = domain.MessageRoleUser
-			}
-			messages = append(messages, domain.SessionSearchMessage{
-				ID: turn.id, Sequence: int64(index + 1), Role: role, Text: turn.text,
-				CreatedAt: session.at.Add(time.Duration(index) * time.Second),
-			})
-		}
-		l.store.messages[sessionID] = messages
-		if _, err := l.svc.IndexChat(ctx, domain.SessionSearchConversation{
-			ID: sessionID, SessionID: domain.SessionID(sessionID), ProjectID: "bench", Harness: domain.HarnessClaudeCode,
-		}); err != nil {
-			t.Fatalf("index %s: %v", session.id, err)
-		}
-		l.indexed = append(l.indexed, sessionsearch.ChatSourceKey(sessionID))
-	}
-	return prefix
-}
-
-func benchDataPath(t *testing.T, env, name string) string {
-	path := os.Getenv(env)
-	if path == "" {
-		t.Skipf("set %s to a local %s (scripts/search-benchmark.sh fetches it)", env, name)
-	}
-	return path
-}
-
-type longMemEvalItem struct {
-	QuestionID         string   `json:"question_id"`
-	QuestionType       string   `json:"question_type"`
-	Question           string   `json:"question"`
-	HaystackDates      []string `json:"haystack_dates"`
-	HaystackSessionIDs []string `json:"haystack_session_ids"`
-	HaystackSessions   [][]struct {
-		Role      string `json:"role"`
-		Content   string `json:"content"`
-		HasAnswer bool   `json:"has_answer"`
-	} `json:"haystack_sessions"`
-	AnswerSessionIDs []string `json:"answer_session_ids"`
-}
-
-// longMemEvalQuickQuestions is the quick profile's sample: the first questions
-// in file order, which span both of the dataset's leading question types.
-const longMemEvalQuickQuestions = 100
-
-func TestSearchBenchmarkLongMemEval(t *testing.T) {
-	path := benchDataPath(t, "AO_SEARCH_BENCH_LONGMEMEVAL", "longmemeval_s_cleaned.json")
-	full := os.Getenv("AO_SEARCH_BENCH_PROFILE") == "full"
-	limit, key := longMemEvalQuickQuestions, "longmemeval-s/quick"
-	if full {
-		limit, key = math.MaxInt, "longmemeval-s/full"
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open dataset: %v", err)
-	}
-	defer func() { _ = file.Close() }()
-	// Stream one question at a time: the file is 264 MB and this has to run on
-	// an 8 GB machine shared with other work.
-	decoder := json.NewDecoder(file)
-	if _, err := decoder.Token(); err != nil {
-		t.Fatalf("read dataset start: %v", err)
-	}
-	loader := newCorpusLoader(t)
-	run := newBenchRun("longmemeval", selectedVariants(t))
-	asked, started := 0, time.Now()
-	for decoder.More() && asked < limit {
-		var item longMemEvalItem
-		if err := decoder.Decode(&item); err != nil {
-			t.Fatalf("decode question: %v", err)
-		}
-		// Abstention questions have no answer session by design; every published
-		// retrieval number excludes them.
-		if strings.HasSuffix(item.QuestionID, "_abs") || len(item.AnswerSessionIDs) == 0 {
-			continue
-		}
-		question := benchQuestion{category: item.QuestionType, text: item.Question,
-			sessions: map[string]bool{}, turns: map[string]bool{}}
-		for _, id := range item.AnswerSessionIDs {
-			question.sessions[id] = true
-		}
-		sessions := make([]corpusSessionText, 0, len(item.HaystackSessions))
-		for index, turns := range item.HaystackSessions {
-			session := corpusSessionText{id: item.HaystackSessionIDs[index], at: longMemEvalDate(item.HaystackDates, index)}
-			for turnIndex, turn := range turns {
-				id := fmt.Sprintf("%s#%d", session.id, turnIndex)
-				if turn.HasAnswer {
-					question.turns[id] = true
-				}
-				session.turns = append(session.turns, corpusTurn{id: id, user: turn.Role == "user", text: turn.Content})
-			}
-			sessions = append(sessions, session)
-		}
-		prefix := loader.load(t, sessions)
-		run.ask(t, loader.svc, prefix, question, domain.SessionSearchParams{})
-		asked++
-		if asked%50 == 0 {
-			t.Logf("longmemeval: %d questions, %s", asked, time.Since(started).Round(time.Second))
-		}
-	}
-	t.Logf("longmemeval: %d questions in %s", asked, time.Since(started).Round(time.Second))
-	run.report(t, key)
-}
-
-func longMemEvalDate(dates []string, index int) time.Time {
-	if index < len(dates) {
-		// "2023/05/20 (Sat) 02:21"
-		if at, err := time.Parse("2006/01/02 (Mon) 15:04", dates[index]); err == nil {
-			return at.UTC()
-		}
-	}
-	return testNow.Add(-time.Duration(index) * time.Hour)
-}
-
-type locomoSample struct {
-	QA []struct {
-		Question string          `json:"question"`
-		Evidence []string        `json:"evidence"`
-		Category json.RawMessage `json:"category"`
-	} `json:"qa"`
-	Conversation map[string]json.RawMessage `json:"conversation"`
-}
-
-// locomoCategories are the paper's category numbers.
-var locomoCategories = map[string]string{
-	"1": "multi-hop", "2": "temporal", "3": "open-domain", "4": "single-hop", "5": "adversarial",
-}
-
-func TestSearchBenchmarkLoCoMo(t *testing.T) {
-	path := benchDataPath(t, "AO_SEARCH_BENCH_LOCOMO", "locomo10.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read dataset: %v", err)
-	}
-	var samples []locomoSample
-	if err := json.Unmarshal(raw, &samples); err != nil {
-		t.Fatalf("decode dataset: %v", err)
-	}
-	loader := newCorpusLoader(t)
-	run := newBenchRun("locomo", selectedVariants(t))
-	started := time.Now()
-	for sampleIndex, sample := range samples {
-		var speakerA string
-		_ = json.Unmarshal(sample.Conversation["speaker_a"], &speakerA)
-		sessions := make([]corpusSessionText, 0, 32)
-		for number := 1; ; number++ {
-			key := fmt.Sprintf("session_%d", number)
-			body, ok := sample.Conversation[key]
-			if !ok {
-				break
-			}
-			var turns []struct {
-				Speaker string `json:"speaker"`
-				DiaID   string `json:"dia_id"`
-				Text    string `json:"text"`
-			}
-			if err := json.Unmarshal(body, &turns); err != nil {
-				t.Fatalf("decode %s: %v", key, err)
-			}
-			session := corpusSessionText{id: fmt.Sprintf("D%d", number), at: testNow.Add(time.Duration(number-200) * 24 * time.Hour)}
-			for _, turn := range turns {
-				// Two people talk; speaker A stands in for the user so both message
-				// kinds are exercised. The mapping is arbitrary, which is why
-				// LoCoMo penalizes any kind weighting that is too strong.
-				session.turns = append(session.turns, corpusTurn{id: turn.DiaID, user: turn.Speaker == speakerA, text: turn.Text})
-			}
-			sessions = append(sessions, session)
-		}
-		prefix := loader.load(t, sessions)
-		for _, qa := range sample.QA {
-			category := locomoCategories[strings.Trim(string(qa.Category), `"`)]
-			if category == "adversarial" || len(qa.Evidence) == 0 {
-				continue
-			}
-			question := benchQuestion{category: category, text: qa.Question, sessions: map[string]bool{}, turns: map[string]bool{}}
-			for _, evidence := range qa.Evidence {
-				// Evidence is "D1:3", and in a few rows "D1:3; D2:5".
-				for _, part := range strings.FieldsFunc(evidence, func(r rune) bool { return r == ';' || r == ',' || r == ' ' }) {
-					sessionID, _, _ := strings.Cut(part, ":")
-					question.sessions[sessionID] = true
-					question.turns[part] = true
-				}
-			}
-			run.ask(t, loader.svc, prefix, question, domain.SessionSearchParams{})
-		}
-		t.Logf("locomo: conversation %d of %d, %s", sampleIndex+1, len(samples), time.Since(started).Round(time.Second))
-	}
-	run.report(t, "locomo/full")
-}
-
-// ---------------------------------------------------------------------------
-// Agentic suite: what AO sessions actually contain. The public suites are
-// conversations; AO sessions are mostly commands, their output, identifiers and
+// The suite: what AO sessions actually contain. They are mostly commands,
+// their output, identifiers and
 // diffs, searched by error strings, symbol names, paths, half-typed words and
 // natural-language questions from agents. Each query is graded by the sessions
 // that answer it. Distractor sessions share vocabulary on purpose (two login
@@ -939,7 +601,8 @@ func TestSearchBenchmarkAgentic(t *testing.T) {
 	run.report(t, "agentic")
 }
 
-// askMapped is ask for a corpus whose session ids map to fixture names.
+// askMapped runs one question through every variant and grades it by the
+// fixture names its session ids map to.
 func (r *benchRun) askMapped(t *testing.T, svc *sessionsearch.Service, ids map[string]string, q benchQuestion) {
 	for _, variant := range r.variants {
 		parsed := domain.ParseSessionSearchQueryWith(q.text, variant.match)
@@ -961,6 +624,6 @@ func (r *benchRun) askMapped(t *testing.T, svc *sessionsearch.Service, ids map[s
 		if variant.name == "shipped" && os.Getenv("AO_SEARCH_BENCH_VERBOSE") == "1" {
 			t.Logf("agentic %-16s %-48q -> %v", q.category, q.text, sessions[:min(len(sessions), 3)])
 		}
-		r.metrics[variant.name].add(q, sessions, nil)
+		r.metrics[variant.name].add(q, sessions)
 	}
 }
