@@ -151,10 +151,10 @@ func browseSessionFilterArgs(params domain.SessionSearchParams) []any {
 //     plus a quarter of the rest; domain.DefaultSessionSearchTailWeight).
 //  4. recency, then id, so equal scores keep a stable order while typing.
 //
-// coverage_tier and kind_tier are always 0 except in the benchmark's ablation
-// variants (all-terms-first and the old hard kind tier), which is why they are
-// still in the ORDER BY: the benchmark measures the alternatives through this
-// exact query rather than a copy.
+// coverage_tier and kind_tier are 0 in the shipped ranking. They are the
+// alternatives it was measured against (all-terms-first and the old hard kind
+// tier), switched on by Ranking.AllTermsTier and Ranking.KindTierFirst, which
+// nothing sets today.
 //
 // Collapsing: when grouped, each session contributes its single best document
 // (ROW_NUMBER over the session partition, using the same order), and carries
@@ -204,7 +204,7 @@ matched AS (
            CASE WHEN ? = '' OR d.id IN (
                SELECT rowid FROM session_search_fts WHERE session_search_fts MATCH ?
            ) THEN 0 ELSE 1 END AS coverage_tier,
-           -- The pre-bm25 kind tier survives only as a benchmark ablation.
+           -- The pre-bm25 kind tier: off unless Ranking.KindTierFirst is set.
            CASE WHEN ? = 0 THEN 0 ELSE CASE d.kind
                WHEN 'title' THEN 0 WHEN 'user' THEN 1 WHEN 'path' THEN 2 WHEN 'assistant' THEN 3 ELSE 4
            END END AS kind_tier,

@@ -11,8 +11,8 @@ import (
 
 // TestParseSessionSearchQuery covers the one parser the palette, the Search
 // page, and `ao search` all use. Each case names the syntax a person types.
-// The match options exist so the benchmark can measure the alternatives; each
-// must still produce the expression it names.
+// The match options are the alternatives the shipped matching was measured
+// against; each must still produce the expression it names.
 func TestParseSessionSearchQueryWithOptions(t *testing.T) {
 	cases := []struct {
 		name    string

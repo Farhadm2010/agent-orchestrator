@@ -354,7 +354,8 @@ const (
 // SessionSearchRanking tunes how candidates are scored.
 //
 // The zero value is the shipped ranking. Like SessionSearchMatchOptions, the
-// knobs exist so the search benchmark can run ablations through the real query.
+// knobs are the alternatives it was measured against, run through the real
+// query. Tests use a few to turn one rule off and show what it fixes.
 type SessionSearchRanking struct {
 	// KindWeights multiply a document's bm25 score by its kind. Nil means
 	// DefaultSessionSearchKindWeights.
@@ -773,12 +774,12 @@ const (
 
 // SessionSearchMatchOptions controls how plain words become an FTS5 expression.
 //
-// The zero value is the shipped behavior. The options exist so the search
-// benchmark can measure each choice against its alternatives (an ablation)
-// through the same parser the product uses, rather than through a copy.
+// The zero value is the shipped behavior. The options are the alternatives
+// each choice was measured against, kept in the parser the product uses
+// rather than in a copy.
 type SessionSearchMatchOptions struct {
 	// RequireAllWords restores strict AND: every plain word must match, and
-	// every word is prefix-expanded. Kept for the benchmark's baseline row.
+	// every word is prefix-expanded: how matching worked before OR ranking.
 	RequireAllWords bool
 	// Prefix chooses which plain words are prefix-matched.
 	Prefix SessionSearchPrefixMode
