@@ -25,22 +25,6 @@ import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 const ALL = "all";
 
 /**
- * A match the search view hands to the session it opens.
- *
- * The session view passes this into the Chat timeline's existing annotation
- * navigation, which is what scrolls to and highlights the matched message. A
- * native-transcript result carries no message id, so it opens the session
- * without pretending to scroll.
- */
-export type SessionSearchOpenTarget = {
-	sessionId: string;
-	projectId: string;
-	messageId: string;
-	/** The matched text, used to highlight the span inside the message body. */
-	text: string;
-};
-
-/**
  * Search every past session by title, message text, and touched file paths.
  *
  * It lives beside the board rather than inside a command palette: past sessions

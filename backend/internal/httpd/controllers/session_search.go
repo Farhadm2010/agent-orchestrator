@@ -18,7 +18,6 @@ import (
 // SessionSearchService is the controller-facing session search contract.
 type SessionSearchService interface {
 	Search(ctx context.Context, parsed domain.SessionSearchParsedQuery, params domain.SessionSearchParams) (domain.SessionSearchResponse, error)
-	CorrectQuery(ctx context.Context, parsed domain.SessionSearchParsedQuery) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error)
 	Coverage(ctx context.Context) (domain.SessionSearchCoverage, error)
 }
 

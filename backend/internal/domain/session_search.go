@@ -33,24 +33,6 @@ const (
 	SessionSearchKindPath SessionSearchKind = "path"
 )
 
-// SessionSearchKindTier orders results by kind: a session name outranks a
-// message, which outranks an agent reply, which outranks tool and command
-// output. Within one tier, bm25 decides.
-func SessionSearchKindTier(kind SessionSearchKind) int {
-	switch kind {
-	case SessionSearchKindTitle:
-		return 0
-	case SessionSearchKindUser:
-		return 1
-	case SessionSearchKindPath:
-		return 2
-	case SessionSearchKindAssistant:
-		return 3
-	default:
-		return 4
-	}
-}
-
 // SessionSearchSourceState is the health of one indexed source.
 type SessionSearchSourceState string
 
@@ -303,21 +285,16 @@ type SessionSearchActivity struct {
 type SessionSearchParams struct {
 	// MatchQuery is an FTS5 MATCH expression, already built by the query parser.
 	MatchQuery string
-	// AllTermsQuery, when set, marks the candidates that match every typed word;
-	// with Ranking.AllTermsTier they rank ahead of partial matches.
-	AllTermsQuery string
 	// ExactQuery, when set, marks the candidates that hold every ranked word as
 	// typed (see SessionSearchParsedQuery.ExactQuery); they rank ahead of
 	// candidates that match only a widened form.
 	ExactQuery string
 	// HighlightTerms are the tokens the result snippets mark.
 	HighlightTerms []SessionSearchHighlightTerm
-	// Ranking tunes the score. The zero value is the shipped ranking.
-	Ranking   SessionSearchRanking
-	ProjectID string
-	Harness   string
-	Machine   string
-	Status    SessionSearchStatusFilter
+	ProjectID      string
+	Harness        string
+	Machine        string
+	Status         SessionSearchStatusFilter
 	// Path restricts to sessions that touched a path containing this text.
 	Path string
 	// ExcludeQuery is an FTS5 expression for terms a result must NOT contain.
@@ -327,13 +304,14 @@ type SessionSearchParams struct {
 	From         *time.Time
 	To           *time.Time
 	Sort         SessionSearchSort
-	// SessionID restricts to one session; used for in-session match lists.
+	// SessionID restricts to one session: the one a pasted pull-request link
+	// belongs to.
 	SessionID string
 	// Group chooses one result per session (the default) or one per document.
 	Group SessionSearchGroup
-	// SkipSnippets returns results without snippets, for callers that only need
-	// the ranking (the search benchmark). A snippet re-tokenizes its document to
-	// place the highlights, which costs about half a millisecond per row.
+	// SkipSnippets returns results without snippets, for a pass that only needs
+	// the ranking. A snippet re-tokenizes its document to place the highlights,
+	// which costs about half a millisecond per row.
 	SkipSnippets bool
 	Limit        int
 	Offset       int
@@ -351,66 +329,6 @@ const (
 	SessionSearchGroupMessage SessionSearchGroup = "message"
 )
 
-// SessionSearchRanking tunes how candidates are scored.
-//
-// The zero value is the shipped ranking. Like SessionSearchMatchOptions, the
-// knobs are the alternatives it was measured against, run through the real
-// query. Tests use a few to turn one rule off and show what it fixes.
-type SessionSearchRanking struct {
-	// KindWeights multiply a document's bm25 score by its kind. Nil means
-	// DefaultSessionSearchKindWeights.
-	KindWeights map[SessionSearchKind]float64
-	// KindTierFirst restores the old hard tier: every title before every user
-	// message before every reply, whatever bm25 says. Benchmark-only.
-	KindTierFirst bool
-	// AllTermsTier ranks documents containing every typed word ahead of all
-	// others, whatever bm25 says (Meilisearch's matchingStrategy "last"). It is
-	// off: on LongMemEval and LoCoMo it changed nothing or cost a little,
-	// because bm25 already ranks a document with every word above one without,
-	// and it costs a second full-text pass per query. Benchmark-only.
-	AllTermsTier bool
-	// SessionTailWeight overrides DefaultSessionSearchTailWeight when positive.
-	SessionTailWeight float64
-	// CombMax ranks a grouped session by its single best document only.
-	CombMax bool
-	// SessionTailDepth overrides DefaultSessionSearchTailDepth when non-zero;
-	// negative counts every other match (the unbounded tail).
-	SessionTailDepth int
-	// NameTierOff turns off the name tier: grouped by session and ranked by
-	// relevance, sessions whose name holds every typed word come first, ahead of
-	// any bm25 score. Without it a session named exactly for the query lost to
-	// long sessions that mention its words hundreds of times, and a session with
-	// nothing indexed but its name (a harness whose transcripts AO cannot read)
-	// could not win at all. Benchmark-only.
-	NameTierOff bool
-	// ExactTierOff turns off the exact tier: candidates holding every ranked
-	// word as typed rank ahead of those that match only its stem or a longer
-	// word. Without it, on real transcripts a session holding "rebased" a
-	// hundred times outranked the one session that said "rebasing", the word
-	// searched for. Benchmark-only.
-	ExactTierOff bool
-	// Typos overrides how misspelled words are repaired (the zero value is the
-	// shipped rule). Benchmark-only.
-	Typos SessionSearchTypoRule
-}
-
-// SessionSearchTypoRule says when a query word is replaced by a close word
-// from the index vocabulary.
-type SessionSearchTypoRule string
-
-const (
-	// SessionSearchTyposDefault is the shipped rule.
-	SessionSearchTyposDefault SessionSearchTypoRule = ""
-	// SessionSearchTyposOff never repairs a word.
-	SessionSearchTyposOff SessionSearchTypoRule = "off"
-	// SessionSearchTyposZeroHit repairs a word only when nothing matches it
-	// (Orca's rule).
-	SessionSearchTyposZeroHit SessionSearchTypoRule = "zero-hit"
-	// SessionSearchTyposFrequencyGap also repairs a word that matches a few
-	// documents when a close word matches far more.
-	SessionSearchTyposFrequencyGap SessionSearchTypoRule = "frequency-gap"
-)
-
 // SessionSearchVocabTerm is one term of the index vocabulary and how many
 // documents hold it.
 type SessionSearchVocabTerm struct {
@@ -424,78 +342,31 @@ type SessionSearchCorrection struct {
 	To   string `json:"to"`
 }
 
-// IsZero reports the shipped ranking (no override set).
-func (r SessionSearchRanking) IsZero() bool {
-	return r.KindWeights == nil && !r.KindTierFirst && !r.AllTermsTier && r.SessionTailWeight == 0 &&
-		!r.CombMax && r.SessionTailDepth == 0 && !r.NameTierOff && !r.ExactTierOff && r.Typos == ""
-}
+// SessionSearchTailWeight scores a grouped session as its best document plus
+// this fraction of its other matching documents. 0 would rank a session by its
+// single best match and 1 by the sum of all of them, which lets a long session
+// win on volume. A quarter helps a session whose evidence is spread over
+// several messages without letting length decide.
+const SessionSearchTailWeight = 0.25
 
-// TailDepth returns how many of a session's other matches its score counts;
-// negative means all of them.
-func (r SessionSearchRanking) TailDepth() int {
-	if r.SessionTailDepth != 0 {
-		return r.SessionTailDepth
-	}
-	return DefaultSessionSearchTailDepth
-}
+// SessionSearchTailDepth is how many of a session's other matches, best first,
+// its tail adds up. With every match counted, a session that relays other
+// sessions' messages, or a very long review, gathers hundreds of weak matches
+// on common words and outranks the session named exactly what was typed.
+const SessionSearchTailDepth = 5
 
-// DefaultSessionSearchTailWeight scores a grouped session as its best document
-// plus this fraction of its other matching documents. 0 would rank a session by
-// its single best match (CombMAX) and 1 by the sum of all of them (CombSUM; Fox
-// & Shaw, "Combination of Multiple Searches", TREC-2, 1994). CombSUM lost 4
-// points of recall@1 on LongMemEval and 13 on LoCoMo, because a long session
-// wins on volume; a quarter of the tail helps a session whose evidence is
-// spread over several messages without letting length decide.
-const DefaultSessionSearchTailWeight = 0.25
-
-// DefaultSessionSearchTailDepth is how many of a session's other matches, best
-// first, its tail adds up. With every match counted, length still decided too
-// often on a real archive: an orchestrator session that relays every worker's
-// messages, or a 600-message review, gathered hundreds of weak matches on
-// common words and outranked the session named exactly what was typed. A
-// handful keeps the multi-evidence benefit the tail exists for.
-const DefaultSessionSearchTailDepth = 5
-
-// TailWeight returns the session tail weight in effect.
-func (r SessionSearchRanking) TailWeight() float64 {
-	switch {
-	case r.CombMax:
-		return 0
-	case r.SessionTailWeight > 0:
-		return r.SessionTailWeight
-	default:
-		return DefaultSessionSearchTailWeight
-	}
-}
-
-// DefaultSessionSearchKindWeights multiply bm25 by document kind.
-//
-// This is a field boost in the spirit of BM25F (Robertson, Zaragoza & Taylor,
-// "Simple BM25 extension to multiple weighted fields", CIKM 2004): a kind is
-// worth more or less evidence, but a strong match in a weaker kind can still
-// beat a weak match in a stronger one. A hard kind tier cannot do that, and on
-// LoCoMo it cost 22 points of turn-level recall@10. The title column also
-// carries its own bm25 column weight, so a title needs no extra kind boost to
-// lead.
-var DefaultSessionSearchKindWeights = map[SessionSearchKind]float64{
+// SessionSearchKindWeights multiply bm25 by document kind: a field boost. A
+// kind is worth more or less evidence, but a strong match in a weaker kind can
+// still beat a weak match in a stronger one, which a hard order by kind cannot
+// do. The title column also carries its own bm25 column weight, so a title
+// needs no extra boost here to lead.
+var SessionSearchKindWeights = map[SessionSearchKind]float64{
 	SessionSearchKindTitle:     1.0,
 	SessionSearchKindUser:      1.25,
 	SessionSearchKindPath:      1.0,
 	SessionSearchKindAssistant: 1.0,
 	SessionSearchKindTool:      0.8,
 	SessionSearchKindCommand:   0.8,
-}
-
-// Weight returns the multiplier for one kind.
-func (r SessionSearchRanking) Weight(kind SessionSearchKind) float64 {
-	weights := r.KindWeights
-	if weights == nil {
-		weights = DefaultSessionSearchKindWeights
-	}
-	if weight, ok := weights[kind]; ok {
-		return weight
-	}
-	return DefaultSessionSearchKindWeights[kind]
 }
 
 // SessionSearchHit is one ranked index row plus its snippet.
@@ -633,19 +504,12 @@ type SessionSearchParsedQuery struct {
 	// MatchQuery is the FTS5 MATCH expression that selects candidates; empty
 	// when the query is only filters (a browse).
 	MatchQuery string
-	// AllTermsQuery is set when MatchQuery admits documents that match only some
-	// of the typed words. It matches the documents that contain every word; the
-	// benchmark's all-terms-tier variant ranks those first. Empty when
-	// MatchQuery already requires every term.
-	AllTermsQuery string
 	// ExactQuery matches the documents that hold every ranked word exactly as
 	// typed: no stem, no prefix. MatchQuery widens each word to the prefix of
 	// its stem so "verified" finds "verification", and that widening must not
 	// let a longer word outrank the word itself; the store ranks this exact tier
 	// first. Empty when no word was widened, or for an explicit OR.
 	ExactQuery string
-	// Terms are the positive search terms, used for match stepping in a session.
-	Terms []string
 	// HighlightTerms are the folded tokens a snippet marks: every token the
 	// match expression can match, with its prefix flag.
 	HighlightTerms []SessionSearchHighlightTerm
@@ -666,10 +530,6 @@ type SessionSearchParsedQuery struct {
 	To   *time.Time
 	// PRRef is set when the query is a pull-request URL.
 	PRRef *SessionSearchPRRef
-	// Suffixes are fzf-style "$" anchors. FTS5 cannot express a suffix match, so
-	// these are returned for the caller to apply as a post-filter on the snippet;
-	// the term is also matched normally so the candidate set stays index-driven.
-	Suffixes []string
 	// HasOr records an explicit OR between terms, which joins the positive
 	// expression with OR instead of AND.
 	HasOr bool
@@ -682,7 +542,6 @@ type SessionSearchParsedQuery struct {
 	Words []string
 
 	phrases, prefixes, exacts []string
-	options                   SessionSearchMatchOptions
 }
 
 // WithWords returns the query with its plain words replaced and its match
@@ -691,8 +550,7 @@ type SessionSearchParsedQuery struct {
 func (p SessionSearchParsedQuery) WithWords(words []string) SessionSearchParsedQuery {
 	out := p
 	out.Words = append([]string(nil), words...)
-	out.Terms = append(append(append(append([]string{}, p.phrases...), words...), p.exacts...), p.prefixes...)
-	out.MatchQuery, out.AllTermsQuery, out.ExactQuery, out.HighlightTerms = buildMatchExpressions(p.phrases, p.prefixes, p.exacts, words, p.HasOr, p.options)
+	out.MatchQuery, out.ExactQuery, out.HighlightTerms = buildMatchExpressions(p.phrases, p.prefixes, p.exacts, words, p.HasOr)
 	return out
 }
 
@@ -756,44 +614,6 @@ var SessionSearchOperatorPrefixes = []string{
 // (no prefix expansion), ^term anchors at the start of a token, and !term
 // excludes.
 func ParseSessionSearchQuery(raw string) SessionSearchParsedQuery {
-	return ParseSessionSearchQueryWith(raw, SessionSearchMatchOptions{})
-}
-
-// SessionSearchPrefixMode says which plain words are prefix-matched.
-type SessionSearchPrefixMode string
-
-const (
-	// SessionSearchPrefixLast expands only the last word, the one still being
-	// typed. It is the default, and Algolia's default queryType (prefixLast).
-	SessionSearchPrefixLast SessionSearchPrefixMode = ""
-	// SessionSearchPrefixAll expands every word.
-	SessionSearchPrefixAll SessionSearchPrefixMode = "all"
-	// SessionSearchPrefixNone matches every word whole.
-	SessionSearchPrefixNone SessionSearchPrefixMode = "none"
-)
-
-// SessionSearchMatchOptions controls how plain words become an FTS5 expression.
-//
-// The zero value is the shipped behavior. The options are the alternatives
-// each choice was measured against, kept in the parser the product uses
-// rather than in a copy.
-type SessionSearchMatchOptions struct {
-	// RequireAllWords restores strict AND: every plain word must match, and
-	// every word is prefix-expanded: how matching worked before OR ranking.
-	RequireAllWords bool
-	// Prefix chooses which plain words are prefix-matched.
-	Prefix SessionSearchPrefixMode
-	// KeepStopwords ranks function words like any other word.
-	KeepStopwords bool
-	// NoStemming matches ranked words as typed. By default each ranked word is
-	// matched as a prefix of its Porter stem, so "signatures verified" also
-	// finds "signature verification"; that won on every benchmark suite.
-	NoStemming bool
-}
-
-// ParseSessionSearchQueryWith is ParseSessionSearchQuery with explicit match
-// options. Production callers use ParseSessionSearchQuery.
-func ParseSessionSearchQueryWith(raw string, options SessionSearchMatchOptions) SessionSearchParsedQuery {
 	parsed := SessionSearchParsedQuery{}
 	var phrases, prefixes, exacts, excluded, words []string
 	textParts := make([]string, 0, 8)
@@ -867,15 +687,6 @@ func ParseSessionSearchQueryWith(raw string, options SessionSearchMatchOptions) 
 			if term := strings.TrimSpace(token[1:]); term != "" {
 				excluded = append(excluded, term)
 			}
-		case strings.HasSuffix(token, "$") && len(token) > 1:
-			// fzf's suffix anchor. FTS5 has no suffix operator, so a suffix term is
-			// matched as a plain token and the suffix is applied as a post-filter
-			// by the caller; recording it keeps that possible without pretending
-			// the index can express it.
-			if suffix := strings.TrimSpace(strings.TrimSuffix(token, "$")); suffix != "" {
-				parsed.Suffixes = append(parsed.Suffixes, suffix)
-				phrases = append(phrases, suffix)
-			}
 		case token == "|" || token == "OR":
 			// An explicit OR marker between groups. Recorded so the expression can
 			// be joined with OR rather than AND.
@@ -887,9 +698,8 @@ func ParseSessionSearchQueryWith(raw string, options SessionSearchMatchOptions) 
 	}
 
 	parsed.Text = strings.TrimSpace(strings.Join(textParts, " "))
-	parsed.Terms = append(append(append(append([]string{}, phrases...), words...), exacts...), prefixes...)
-	parsed.Words, parsed.phrases, parsed.prefixes, parsed.exacts, parsed.options = words, phrases, prefixes, exacts, options
-	parsed.MatchQuery, parsed.AllTermsQuery, parsed.ExactQuery, parsed.HighlightTerms = buildMatchExpressions(phrases, prefixes, exacts, words, parsed.HasOr, options)
+	parsed.Words, parsed.phrases, parsed.prefixes, parsed.exacts = words, phrases, prefixes, exacts
+	parsed.MatchQuery, parsed.ExactQuery, parsed.HighlightTerms = buildMatchExpressions(phrases, prefixes, exacts, words, parsed.HasOr)
 	parsed.ExcludeQuery = buildExcludeExpression(excluded)
 	return parsed
 }
@@ -1053,30 +863,28 @@ func parsePRURL(token string) (SessionSearchPRRef, bool) {
 // quote or a bare "-" would otherwise be a query error).
 //
 // Explicit operators are requirements: a "quoted phrase" (matched whole),
-// 'exact (no prefix expansion), ^prefix, and a suffix$ term must all match.
+// 'exact (no prefix expansion) and ^prefix must all match.
 //
 // Plain words are ranked, not required. Requiring every word is what a filter
-// does, and it is wrong for search: a natural-language question ("how did we fix
-// the flaky login test?") almost never has every one of its words in a single
-// message, so a strict AND returns nothing. Measured on LongMemEval-S and LoCoMo,
-// strict AND returned zero results for 100% of questions. So plain words are
-// joined with OR and bm25 does the ranking, which is the BM25 model as designed
-// (Robertson & Zaragoza, "The Probabilistic Relevance Framework: BM25 and
-// Beyond", 2009) and what Lucene's should-clauses, Meilisearch's default
-// matchingStrategy ("last") and Algolia's removeWordsIfNoResults all do.
-// Documents that contain every word still come first: allTerms matches them
-// and the store ranks that tier ahead of partial matches.
+// does, and it is wrong for search: a question ("how did we fix the flaky login
+// test?") almost never has every one of its words in a single message, so a
+// strict AND returns nothing. Plain words are joined with OR and bm25 ranks
+// them, so a document holding more of the words, or rarer ones, comes first.
 //
 // Two refinements keep OR precise:
 //
 //   - Stopwords are dropped from the ranked words (unless every word is one),
-//     because "what", "did" and "the" occur in nearly every message: they would
-//     admit the whole index as candidates and, under the all-terms tier, demand
-//     words nobody meant. A phrase keeps its stopwords; quote to require one.
+//     because "what", "did" and "the" occur in nearly every message and would
+//     admit the whole index as candidates. A phrase keeps its stopwords; quote
+//     to require one.
 //   - Only the last word is prefix-matched. It is the one still being typed;
 //     expanding every word ("i"* matches every token starting with i) floods
-//     the candidates. This is Algolia's default queryType, prefixLast.
-func buildMatchExpressions(phrases, prefixes, exacts, words []string, useOr bool, options SessionSearchMatchOptions) (match, allTerms, exact string, highlights []SessionSearchHighlightTerm) {
+//     the candidates.
+//
+// Each ranked word is matched as a prefix of its Porter stem, so "signatures
+// verified" also finds "signature verification". exact is the same words as
+// typed, for the tier that keeps the word itself ahead of its longer forms.
+func buildMatchExpressions(phrases, prefixes, exacts, words []string, useOr bool) (match, exact string, highlights []SessionSearchHighlightTerm) {
 	required := make([]string, 0, len(phrases)+len(prefixes)+len(exacts))
 	seen := map[string]struct{}{}
 	add := func(list *[]string, term string, prefix bool) {
@@ -1103,16 +911,7 @@ func buildMatchExpressions(phrases, prefixes, exacts, words []string, useOr bool
 		add(&required, anchor, true)
 	}
 
-	if options.RequireAllWords {
-		for _, word := range words {
-			add(&required, word, true)
-		}
-		words = nil
-	}
 	ranked := rankedWords(words)
-	if options.KeepStopwords {
-		ranked = searchableWords(words)
-	}
 	optional := make([]string, 0, len(ranked))
 	// The words as typed, for the exact tier, and whether any was widened.
 	asTyped := make([]string, 0, len(ranked))
@@ -1120,22 +919,14 @@ func buildMatchExpressions(phrases, prefixes, exacts, words []string, useOr bool
 	widened := false
 	for index, word := range ranked {
 		prefix := index == len(ranked)-1
-		switch options.Prefix {
-		case SessionSearchPrefixAll:
-			prefix = true
-		case SessionSearchPrefixNone:
-			prefix = false
-		}
 		if tinyWord(word) {
 			// "c*" expands to every term starting with c: seconds of work for
 			// a match that means nothing.
 			prefix = false
 		}
 		term := word
-		if !options.NoStemming {
-			if root, ok := stemRoot(word); ok {
-				term, prefix = root, true
-			}
+		if root, ok := stemRoot(word); ok {
+			term, prefix = root, true
 		}
 		add(&optional, term, prefix)
 		if prefix || term != word {
@@ -1156,23 +947,22 @@ func buildMatchExpressions(phrases, prefixes, exacts, words []string, useOr bool
 		all := make([]string, 0, len(required)+len(optional))
 		all = append(all, required...)
 		all = append(all, optional...)
-		return strings.Join(all, " OR "), "", "", highlights
+		return strings.Join(all, " OR "), "", highlights
 	}
 	switch {
 	case len(required) == 0 && len(optional) == 0:
-		return "", "", "", nil
+		return "", "", nil
 	case len(optional) <= 1:
 		// One word (or none) is not a ranking problem: every term is required.
 		// It is still a widened one ("rebasing" also finds "rebased"), so the
 		// exact tier still applies.
-		return strings.Join(append(required, optional...), " AND "), "", exact, highlights
+		return strings.Join(append(required, optional...), " AND "), exact, highlights
 	}
 	anyWord := "(" + strings.Join(optional, " OR ") + ")"
-	every := strings.Join(append(append([]string{}, required...), optional...), " AND ")
 	if len(required) > 0 {
-		return strings.Join(required, " AND ") + " AND " + anyWord, every, exact, highlights
+		return strings.Join(required, " AND ") + " AND " + anyWord, exact, highlights
 	}
-	return anyWord, every, exact, highlights
+	return anyWord, exact, highlights
 }
 
 // stemRoot is the prefix a word's inflected forms share: its Porter stem, cut

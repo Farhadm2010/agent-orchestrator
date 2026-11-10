@@ -127,40 +127,35 @@ func browseSessionFilterArgs(params domain.SessionSearchParams) []any {
 
 // searchSessionSearchDocsSQL ranks candidates and returns one page.
 //
-// Scoring is bm25 throughout. FTS5's bm25 (k1 = 1.2, b = 0.75, the Robertson
-// defaults Lucene also ships) weights the title column above paths above body,
-// and the document's kind multiplies the score (a BM25F-style field boost; see
-// domain.DefaultSessionSearchKindWeights). FTS5 scores are negative, better is
-// more negative, so a weight above 1 promotes and ascending order is best-first.
+// Scoring is bm25 throughout. FTS5's bm25 (k1 = 1.2, b = 0.75) weights the
+// title column above paths above body, and the document's kind multiplies the
+// score (a field boost; see domain.SessionSearchKindWeights). FTS5 scores are
+// negative, better is more negative, so a weight above 1 promotes and
+// ascending order is best-first.
 //
 // Order, most significant first:
 //
 //  1. name: grouped by session, sessions whose name holds every typed word
-//     come first (sessionsNamedFor; off with Ranking.NameTierOff). A name
-//     match is the strongest evidence of the session meant, and bm25 cannot
-//     see it: a session with nothing indexed but its name, or one mentioned
-//     hundreds of times elsewhere, would otherwise lose to volume.
+//     come first (sessionsNamedFor). A name match is the strongest evidence
+//     of the session meant, and bm25 cannot see it: a session with nothing
+//     indexed but its name, or one mentioned hundreds of times elsewhere,
+//     would otherwise lose to volume.
 //  2. exact: candidates that hold every ranked word as typed come before
 //     those that match only a widened form (the stem's prefix, or a longer
-//     word); off with Ranking.ExactTierOff. The match widens each word so
-//     "verified" finds "verification", but bm25 cannot tell the widened match
-//     from the word itself, so a session repeating "rebased" outranked the one
-//     that said "rebasing". For a grouped session, any one exact document
-//     lifts the session, and that document is the row it is shown as.
+//     word). The match widens each word so "verified" finds "verification",
+//     but bm25 cannot tell the widened match from the word itself, so a
+//     session repeating "rebased" outranked the one that said "rebasing". For
+//     a grouped session, any one exact document lifts the session, and that
+//     document is the row it is shown as.
 //  3. rank: the weighted bm25 score (for a grouped session, its best document
-//     plus a quarter of the rest; domain.DefaultSessionSearchTailWeight).
+//     plus a quarter of the rest; domain.SessionSearchTailWeight).
 //  4. recency, then id, so equal scores keep a stable order while typing.
-//
-// coverage_tier and kind_tier are 0 in the shipped ranking. They are the
-// alternatives it was measured against (all-terms-first and the old hard kind
-// tier), switched on by Ranking.AllTermsTier and Ranking.KindTierFirst, which
-// nothing sets today.
 //
 // Collapsing: when grouped, each session contributes its single best document
 // (ROW_NUMBER over the session partition, using the same order), and carries
-// how many documents in it matched. Elasticsearch calls this field collapsing;
-// without it one long session can fill a whole page, and the palette shows only
-// eight rows. The match count lets the row say "+N more in this session".
+// how many documents in it matched. Without it one long session can fill a
+// whole page, and the palette shows only eight rows. The match count lets the
+// row say "+N more in this session".
 //
 // Snippets are not computed by FTS5. snippet() re-runs the match per call, and
 // for a prefix term that rebuilds a merged posting list each time; the page's
@@ -201,13 +196,6 @@ matched AS (
                WHEN 'tool' THEN ?
                ELSE ?
            END AS rank,
-           CASE WHEN ? = '' OR d.id IN (
-               SELECT rowid FROM session_search_fts WHERE session_search_fts MATCH ?
-           ) THEN 0 ELSE 1 END AS coverage_tier,
-           -- The pre-bm25 kind tier: off unless Ranking.KindTierFirst is set.
-           CASE WHEN ? = 0 THEN 0 ELSE CASE d.kind
-               WHEN 'title' THEN 0 WHEN 'user' THEN 1 WHEN 'path' THEN 2 WHEN 'assistant' THEN 3 ELSE 4
-           END END AS kind_tier,
            -- Sessions named for the query (a JSON array; '' when none).
            CASE WHEN ? <> '' AND d.session_id IN (SELECT value FROM json_each(?)) THEN 0 ELSE 1 END AS name_tier,
            -- Holds every ranked word as typed ('' when nothing was widened).
@@ -239,12 +227,10 @@ ranked AS (
                PARTITION BY CASE WHEN ? = 1 THEN m.session_id ELSE CAST(m.id AS TEXT) END
                ORDER BY m.message_id = '' ASC, m.kind = 'title' ASC, m.source_key LIKE 'review:%' ASC,
                         CASE WHEN ? = 1 THEN m.created_at END DESC,
-                        m.coverage_tier, m.kind_tier, m.exact_tier, m.rank, m.created_at DESC, m.id
+                        m.exact_tier, m.rank, m.created_at DESC, m.id
            ) AS position_in_session,
            0 AS session_matches,
            MIN(m.rank) OVER (PARTITION BY m.session_id) AS session_best_rank,
-           MIN(m.coverage_tier) OVER (PARTITION BY m.session_id) AS session_coverage_tier,
-           MIN(m.kind_tier) OVER (PARTITION BY m.session_id) AS session_kind_tier,
            MIN(m.exact_tier) OVER (PARTITION BY m.session_id) AS session_exact_tier,
            ROW_NUMBER() OVER (PARTITION BY m.session_id ORDER BY m.rank, m.id) AS rank_in_session,
            COUNT(*) OVER () AS candidate_count
@@ -252,24 +238,21 @@ ranked AS (
 ),
 tailed AS (
     -- A session's tail: its next-best matches after the best one, at most
-    -- domain.SessionSearchRanking.TailDepth() of them (negative: all). An
-    -- unbounded tail let a long session win on volume alone: the orchestrator,
-    -- which relays every worker's messages, outranked the session named
-    -- exactly what was typed.
+    -- domain.SessionSearchTailDepth of them. An unbounded tail lets a long
+    -- session win on volume alone: the orchestrator, which relays every
+    -- worker's messages, outranked the session named exactly what was typed.
     SELECT r.*,
-           SUM(CASE WHEN r.rank_in_session > 1 AND (? < 0 OR r.rank_in_session <= ? + 1) THEN r.rank ELSE 0 END)
+           SUM(CASE WHEN r.rank_in_session > 1 AND r.rank_in_session <= ? + 1 THEN r.rank ELSE 0 END)
                OVER (PARTITION BY r.session_id) AS session_tail
     FROM ranked r
 ),
 scored AS (
     -- One blended score per session: its best document, title or content (the
     -- title column weighs 8x in bm25, so a name match leads), plus a fraction
-    -- of its tail (domain.SessionSearchRanking.SessionTailWeight).
+    -- of its tail (domain.SessionSearchTailWeight).
     -- Ungrouped rows score, and tier, as themselves.
     SELECT r.*,
            CASE WHEN ? = 1 THEN r.session_best_rank + ? * r.session_tail ELSE r.rank END AS score,
-           CASE WHEN ? = 1 THEN r.session_coverage_tier ELSE r.coverage_tier END AS order_coverage_tier,
-           CASE WHEN ? = 1 THEN r.session_kind_tier ELSE r.kind_tier END AS order_kind_tier,
            CASE WHEN ? = 1 THEN r.session_exact_tier ELSE r.exact_tier END AS order_exact_tier
     FROM tailed r
     WHERE r.position_in_session = 1
@@ -281,7 +264,7 @@ page AS (
     SELECT r.*, COUNT(*) OVER () AS match_total,
            CASE WHEN ? = 1 THEN r.created_at END AS recency
     FROM scored r
-    ORDER BY recency DESC, r.order_coverage_tier ASC, r.order_kind_tier ASC, r.name_tier ASC, r.order_exact_tier ASC, r.score ASC, r.created_at DESC, r.id
+    ORDER BY recency DESC, r.name_tier ASC, r.order_exact_tier ASC, r.score ASC, r.created_at DESC, r.id
     LIMIT ? OFFSET ?
 )
 -- A reviewer chat stays searchable after its review is archived (which is
@@ -301,7 +284,7 @@ FROM page p
 JOIN session_search_docs d ON d.id = p.id
 LEFT JOIN session_search_text t ON t.id = p.id
 LEFT JOIN review rv ON d.source_key = 'review:' || rv.id AND rv.is_archived = 0 AND rv.interface_mode = 'chat'
-ORDER BY p.recency DESC, p.order_coverage_tier ASC, p.order_kind_tier ASC, p.name_tier ASC, p.order_exact_tier ASC, p.score ASC, p.created_at DESC, p.id;`
+ORDER BY p.recency DESC, p.name_tier ASC, p.order_exact_tier ASC, p.score ASC, p.created_at DESC, p.id;`
 
 // browseSessionSearchDocsSQL lists one row per session for the recency view.
 //
@@ -327,10 +310,9 @@ LIMIT ? OFFSET ?;`
 // considers. Below it, results are exact. Above it, the page is built from the
 // best 2,000 matches by bm25, which the kind weights (0.8x to 1.25x) cannot
 // reorder past: a document outside the top 2,000 would need a raw score within
-// a factor of 1.56 of the page's, and the page is 25 rows. Meilisearch bounds
-// its candidate set the same way (maxTotalHits, 1,000 by default). On a
-// 22,000-document archive, a word in 6,700 documents fell from about 300 ms to
-// the cost of the FTS pass alone.
+// a factor of 1.56 of the page's, and the page is 25 rows. With the cap, a
+// word that matches thousands of documents costs the full-text pass alone
+// instead of a row lookup per match.
 const sessionSearchCandidateCap = 2000
 
 // sessionCreatedMillisSQL is a session's creation time in Unix milliseconds.
@@ -440,46 +422,37 @@ func (s *Store) searchSessionSearchDocs(ctx context.Context, params domain.Sessi
 		limit = pass.limit
 	}
 	offset := max(params.Offset, 0)
-	ranking := params.Ranking
-	recent, grouped, tierFirst := 0, 0, 0
+	recent, grouped := 0, 0
 	if params.Sort == domain.SessionSearchSortRecent {
 		recent = 1
 	}
 	if params.Group != domain.SessionSearchGroupMessage {
 		grouped = 1
 	}
-	if ranking.KindTierFirst {
-		tierFirst = 1
-	}
-	allTerms := ""
-	if ranking.AllTermsTier {
-		allTerms = params.AllTermsQuery
-	}
 	// A recency sort orders by time first, so the exact tier would cost a
 	// full-text pass that changes nothing.
 	exact := ""
-	if !ranking.ExactTierOff && recent == 0 {
+	if recent == 0 {
 		exact = params.ExactQuery
 	}
 	// The name tier orders sessions by relevance; a recency sort or a list of
 	// single messages has no use for it.
 	named := ""
-	if grouped == 1 && recent == 0 && !ranking.NameTierOff {
+	if grouped == 1 && recent == 0 {
 		var err error
 		if named, err = s.sessionsNamedFor(ctx, params.HighlightTerms); err != nil {
 			return nil, false, err
 		}
 	}
+	weights := domain.SessionSearchKindWeights
 	args := make([]any, 0, 40)
 	args = append(args, params.MatchQuery, capped,
-		ranking.Weight(domain.SessionSearchKindTitle),
-		ranking.Weight(domain.SessionSearchKindUser),
-		ranking.Weight(domain.SessionSearchKindPath),
-		ranking.Weight(domain.SessionSearchKindAssistant),
-		ranking.Weight(domain.SessionSearchKindTool),
-		ranking.Weight(domain.SessionSearchKindCommand),
-		allTerms, allTerms,
-		tierFirst,
+		weights[domain.SessionSearchKindTitle],
+		weights[domain.SessionSearchKindUser],
+		weights[domain.SessionSearchKindPath],
+		weights[domain.SessionSearchKindAssistant],
+		weights[domain.SessionSearchKindTool],
+		weights[domain.SessionSearchKindCommand],
 		named, named,
 		exact, exact,
 	)
@@ -489,8 +462,7 @@ func (s *Store) searchSessionSearchDocs(ctx context.Context, params domain.Sessi
 	if params.SkipSnippets {
 		skipSnippets = 1
 	}
-	depth := ranking.TailDepth()
-	args = append(args, grouped, recent, depth, depth, grouped, ranking.TailWeight(), grouped, grouped, grouped, recent, limit, offset, skipSnippets)
+	args = append(args, grouped, recent, domain.SessionSearchTailDepth, grouped, domain.SessionSearchTailWeight, grouped, recent, limit, offset, skipSnippets)
 	rows, err := s.readDB.QueryContext(ctx, searchSessionSearchDocsSQL, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("search session index: %w", err)
@@ -533,10 +505,9 @@ func (s *Store) searchSessionSearchDocs(ctx context.Context, params domain.Sessi
 // CountSessionSearchDocsMatching returns how many results a query has, ignoring
 // limit and offset: matching sessions when grouped, matching documents when not.
 //
-// A page length is not a total: Orca shows "12 shown · 47 recent" and offers
-// "Show more", and neither is possible if the daemon reports the page size as
-// the count. The count runs the same WHERE clause as the search with the LIMIT
-// removed, so the two can never disagree about what matched.
+// A page length is not a total: "12 of 47" and "Show more" need the real
+// count. It runs the same WHERE clause as the search with the LIMIT removed,
+// so the two can never disagree about what matched.
 func (s *Store) CountSessionSearchDocsMatching(ctx context.Context, params domain.SessionSearchParams) (int64, error) {
 	counted := "COUNT(DISTINCT d.session_id)"
 	if params.Group == domain.SessionSearchGroupMessage {

@@ -11,11 +11,10 @@ import (
 
 // Typo repair. A word matches as typed, by its stem and as a prefix, so a
 // half-typed word or another form of it is found; a swapped or wrong letter is
-// not, and in the benchmark one typo per query cost 5 to 11 points of "right
-// session first", with 30% of misspelled coding queries finding nothing.
+// not, and the query then finds nothing.
 //
-// A word is repaired by looking up close words in the index's own vocabulary,
-// so it can only become a word some session actually contains:
+// A word that matches nothing is repaired by looking up close words in the
+// index's own vocabulary, so it can only become a word some session contains:
 //
 //   - only plain words of typoMinRunes letters or more (phrases, 'exact and
 //     ^anchored terms are taken as written);
@@ -30,42 +29,20 @@ const (
 	// typoLongerSlack is how much longer a candidate may be when the word is
 	// compared with its start (a half-typed word).
 	typoLongerSlack   = 12
-	typoMinDocs       = 2
 	typoMinSimilarity = 0.82
-	// typoRareDocs and typoGapFactor are the frequency-gap rule: a word found in
-	// at most typoRareDocs documents is repaired too when a close word is found
-	// in typoGapFactor times as many.
-	typoRareDocs  = 3
-	typoGapFactor = 10
 )
 
-// shippedTypoRule is the rule used when the ranking does not choose one.
-const shippedTypoRule = domain.SessionSearchTyposZeroHit
-
-// CorrectQuery returns the query with misspelled plain words replaced by the
+// correctQuery returns the query with misspelled plain words replaced by the
 // closest word from the index vocabulary, and the corrections it made. A query
 // with nothing to correct comes back unchanged.
-func (s *Service) CorrectQuery(ctx context.Context, parsed domain.SessionSearchParsedQuery) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error) {
-	if s == nil {
-		return parsed, nil, nil
-	}
-	return s.correctQuery(ctx, parsed, s.ranking.Typos)
-}
-
-func (s *Service) correctQuery(ctx context.Context, parsed domain.SessionSearchParsedQuery, rule domain.SessionSearchTypoRule) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error) {
+func (s *Service) correctQuery(ctx context.Context, parsed domain.SessionSearchParsedQuery) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error) {
 	if s == nil || s.store == nil || len(parsed.Words) == 0 {
-		return parsed, nil, nil
-	}
-	if rule == domain.SessionSearchTyposDefault {
-		rule = shippedTypoRule
-	}
-	if rule == domain.SessionSearchTyposOff {
 		return parsed, nil, nil
 	}
 	words := append([]string(nil), parsed.Words...)
 	var corrections []domain.SessionSearchCorrection
 	for index, word := range words {
-		replacement, err := s.correctWord(ctx, word, rule)
+		replacement, err := s.correctWord(ctx, word)
 		if err != nil {
 			return parsed, nil, err
 		}
@@ -84,12 +61,12 @@ func (s *Service) correctQuery(ctx context.Context, parsed domain.SessionSearchP
 // leave it alone. Each run of letters is corrected on its own, so an
 // identifier with one misspelled part ("SQILTE_BUSY", "dokcer-compose.yml")
 // keeps the rest as typed.
-func (s *Service) correctWord(ctx context.Context, word string, rule domain.SessionSearchTypoRule) (string, error) {
+func (s *Service) correctWord(ctx context.Context, word string) (string, error) {
 	runs := letterRuns(word)
 	out, changed := word, false
 	for index := len(runs) - 1; index >= 0; index-- {
 		run := runs[index]
-		fixed, err := s.correctPart(ctx, word[run[0]:run[1]], rule)
+		fixed, err := s.correctPart(ctx, word[run[0]:run[1]])
 		if err != nil {
 			return "", err
 		}
@@ -105,7 +82,7 @@ func (s *Service) correctWord(ctx context.Context, word string, rule domain.Sess
 }
 
 // correctPart corrects one run of letters, or returns "".
-func (s *Service) correctPart(ctx context.Context, part string, rule domain.SessionSearchTypoRule) (string, error) {
+func (s *Service) correctPart(ctx context.Context, part string) (string, error) {
 	folded := domain.FoldSessionSearchText(part)
 	length := utf8.RuneCountInString(folded)
 	if length < typoMinRunes {
@@ -116,17 +93,12 @@ func (s *Service) correctPart(ctx context.Context, part string, rule domain.Sess
 	if err != nil {
 		return "", err
 	}
-	minDocs := int64(typoMinDocs)
-	switch {
-	case found == 0:
-		// Nothing matches as typed: any close word some session contains is
-		// better than no results, so a word held by one document qualifies.
-		minDocs = 1
-	case rule == domain.SessionSearchTyposFrequencyGap && found <= typoRareDocs:
-		minDocs = max(minDocs, found*typoGapFactor)
-	default:
+	if found != 0 {
 		return "", nil
 	}
+	// Nothing matches as typed: any close word some session contains is
+	// better than no results, so a word held by one document qualifies.
+	const minDocs = 1
 	first, _ := utf8.DecodeRuneInString(folded)
 	candidates, err := s.store.SessionSearchVocabCandidates(ctx, string(first),
 		max(1, length-typoLengthSlack), length+typoLongerSlack, minDocs)

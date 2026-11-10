@@ -35,10 +35,6 @@ func (s *stubSessionSearch) Search(_ context.Context, parsed domain.SessionSearc
 	return s.response, s.err
 }
 
-func (s *stubSessionSearch) CorrectQuery(_ context.Context, parsed domain.SessionSearchParsedQuery) (domain.SessionSearchParsedQuery, []domain.SessionSearchCorrection, error) {
-	return parsed, nil, nil
-}
-
 func (s *stubSessionSearch) Coverage(context.Context) (domain.SessionSearchCoverage, error) {
 	return s.coverage, s.err
 }
@@ -178,9 +174,6 @@ func TestSearchSessionsParsesOperatorsAndFilters(t *testing.T) {
 	}
 	if parsed.ExcludeQuery != `"upload"` {
 		t.Fatalf("exclude = %q", parsed.ExcludeQuery)
-	}
-	if len(parsed.Terms) != 4 {
-		t.Fatalf("terms = %v, want backoff, the phrase, the exact term, the prefix", parsed.Terms)
 	}
 	if svc.params.Status != domain.SessionSearchStatusKilled || svc.params.Path != "src/upload" {
 		t.Fatalf("filters = %+v", svc.params)

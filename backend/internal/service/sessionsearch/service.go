@@ -154,11 +154,6 @@ type Options struct {
 	Now func() time.Time
 	// Logger receives indexer warnings. Nil discards them.
 	Logger *slog.Logger
-	// Ranking replaces the shipped ranking for requests that do not set their
-	// own. It exists so a ranking change can be tried end to end against a
-	// real archive (TestServeSessionSearchOverSnapshot); the daemon leaves it
-	// zero.
-	Ranking domain.SessionSearchRanking
 }
 
 // Service indexes session content and answers ranked queries over it.
@@ -170,7 +165,6 @@ type Service struct {
 	machine string
 	now     func() time.Time
 	log     *slog.Logger
-	ranking domain.SessionSearchRanking
 
 	mu           sync.Mutex
 	state        string
@@ -189,7 +183,7 @@ func New(opts Options) *Service {
 	}
 	return &Service{
 		store: opts.Store, roots: opts.Roots, namer: opts.Namer, prs: opts.PRs,
-		machine: opts.Machine, now: now, log: log, state: "ready", ranking: opts.Ranking,
+		machine: opts.Machine, now: now, log: log, state: "ready",
 	}
 }
 
@@ -205,12 +199,7 @@ func (s *Service) Search(ctx context.Context, parsed domain.SessionSearchParsedQ
 	if err := parsed.Validate(); err != nil {
 		return domain.SessionSearchResponse{}, apierr.Invalid("SESSION_SEARCH_INVALID_RANGE", err.Error(), nil)
 	}
-	typoRule := s.ranking.Typos
-	if params.Ranking.Typos != domain.SessionSearchTyposDefault {
-		// A benchmark's ranking override also chooses the typo rule.
-		typoRule = params.Ranking.Typos
-	}
-	parsed, corrections, err := s.correctQuery(ctx, parsed, typoRule)
+	parsed, corrections, err := s.correctQuery(ctx, parsed)
 	if err != nil {
 		return domain.SessionSearchResponse{}, err
 	}
@@ -226,9 +215,6 @@ func (s *Service) Search(ctx context.Context, parsed domain.SessionSearchParsedQ
 	}
 	if parsed.To != nil {
 		params.To = parsed.To
-	}
-	if params.Ranking.IsZero() {
-		params.Ranking = s.ranking
 	}
 	// A typed sort: operator wins; otherwise the caller's sort stands, and
 	// relevance is the default when neither chose.
@@ -275,7 +261,6 @@ func (s *Service) Search(ctx context.Context, parsed domain.SessionSearchParsedQ
 	case match != "":
 		params.MatchQuery = match
 		if match == parsed.MatchQuery {
-			params.AllTermsQuery = parsed.AllTermsQuery
 			params.ExactQuery = parsed.ExactQuery
 			params.HighlightTerms = parsed.HighlightTerms
 		}
@@ -947,17 +932,7 @@ func stampFingerprint(stamp domain.SessionSearchConversationStamp) string {
 // is part of both the stamp and the fingerprint, so bumping it makes the next
 // sweep re-index every conversation once, even though none of them changed.
 // Without it, a change to how documents are built would only reach sessions
-// that happen to receive a new message.
-//
-//	1: the original format.
-//	2: tool and command rows no longer copy the session's paths.
-//	3: activities open at their turn's message; titles carry branch and project.
-//	4: titles are dated by their session, not the pass; tool details are
-//	   indexed as their text values rather than raw JSON.
-//	5: Orca's coverage (coverage.go): a tool row is its name, one argument
-//	   and the first 3,072 characters of output; reasoning is not indexed.
-//	6: a long message's chunks overlap, so a quoted phrase across a chunk
-//	   boundary is found.
+// that happen to receive a new message. Bump it when those documents change.
 const indexFormatVersion = 6
 
 // stampValue renders the stamp a pass compared, or the empty string when the

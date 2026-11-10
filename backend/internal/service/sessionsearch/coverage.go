@@ -7,21 +7,20 @@ import (
 )
 
 // What a tool call, a tool result and reasoning contribute to the index, the
-// same for every source (AO Chat, Claude Code, Codex, OpenCode) and the same
-// as Orca's session search:
+// same for every source (AO Chat, Claude Code, Codex, OpenCode):
 //
 //   - A tool call is its name and one argument: the first of
 //     toolArgumentKeys that holds text, cut to toolArgumentChars. What a
 //     person remembers about a call is the command it ran, the file it read or
 //     the pattern it searched; edit contents and the rest of the arguments are
 //     not indexed.
-//   - A tool result keeps its first toolOutputChars. Logs and file dumps were
-//     most of the index's size while adding little that is searched.
+//   - A tool result keeps its first toolOutputChars. Logs and file dumps
+//     would be most of the index's size while adding little that is searched.
 //   - Reasoning (Claude thinking, Codex and OpenCode reasoning, AO Chat
 //     reasoning activities) is not indexed. It restates the turn's reply and
 //     plan, and it is the model talking to itself, not what anyone searches.
 //
-// Messages, plans, titles and file paths are indexed as before.
+// Messages, plans, titles and file paths are not cut by these rules.
 const (
 	toolArgumentChars = 2000
 	toolOutputChars   = 3072
@@ -189,9 +188,9 @@ func activityTool(detail string) chatTool {
 }
 
 // toolResultText is the text of a tool result: a string as is, or the text of
-// each part of a content array ({"type":"text","text":...}), the way Orca
-// reads results. An object with a content array (an MCP result) is read
-// through it. Anything else falls back to its string values.
+// each part of a content array ({"type":"text","text":...}). An object with a
+// content array (an MCP result) is read through it. Anything else falls back
+// to its string values.
 func toolResultText(raw json.RawMessage) string {
 	raw = json.RawMessage(strings.TrimSpace(string(raw)))
 	if len(raw) == 0 || string(raw) == "null" {

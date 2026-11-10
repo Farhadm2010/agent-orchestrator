@@ -309,7 +309,7 @@ func TestRankingBenchmark(t *testing.T) {
 // TestRankingBenchmarkKindWeights pins the kind weighting: with the same text in
 // every kind, a session name outranks the person's words, which outrank the
 // agent's reply, which outranks tool and command output. The weights multiply
-// bm25 (domain.DefaultSessionSearchKindWeights), so this order holds when the
+// bm25 (domain.SessionSearchKindWeights), so this order holds when the
 // match is equally good, not regardless of how good it is; see
 // TestRankingBenchmarkWeightsAreNotTiers for the other half.
 func TestRankingBenchmarkKindWeights(t *testing.T) {

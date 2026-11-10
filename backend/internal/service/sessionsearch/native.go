@@ -42,18 +42,8 @@ type nativeLine struct {
 // nativeFormat is the version of what the native readers extract. It is
 // recorded on each native source; a source read by an older version is reset
 // and read again from the start, because a native cursor is a byte offset and
-// would otherwise never revisit text an older reader skipped.
-//
-//	2: Claude queued prompts and edited files; Codex reads one stream per file
-//	   (no duplicate messages) and adds file changes, MCP and web tools;
-//	   OpenCode v2 adds tool calls, their output and reasoning.
-//	3: long command output keeps its start as well as its end; a long message
-//	   is split into chunks instead of cut at 8 KiB.
-//	4: Orca's coverage (coverage.go): a tool call is its name and one
-//	   argument, a tool result its first 3,072 characters; reasoning and edit
-//	   contents are not indexed.
-//	5: a long message's chunks overlap, so a quoted phrase across a chunk
-//	   boundary is found.
+// would otherwise never revisit text an older reader skipped. Bump it when
+// the documents a transcript produces change.
 const nativeFormat = "native-v5"
 
 // nativeDocs turns one parsed unit into its documents. A tool row is already

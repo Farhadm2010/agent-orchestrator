@@ -11,55 +11,28 @@ import (
 
 // TestParseSessionSearchQuery covers the one parser the palette, the Search
 // page, and `ao search` all use. Each case names the syntax a person types.
-// The match options are the alternatives the shipped matching was measured
-// against; each must still produce the expression it names.
-func TestParseSessionSearchQueryWithOptions(t *testing.T) {
-	cases := []struct {
-		name    string
-		options domain.SessionSearchMatchOptions
-		want    string
-	}{
-		{"no stemming", domain.SessionSearchMatchOptions{NoStemming: true}, `("flaky" OR "logins"*)`},
-		// v1 required every word as typed, stopwords included.
-		{"every word required", domain.SessionSearchMatchOptions{RequireAllWords: true, NoStemming: true}, `"the"* AND "flaky"* AND "logins"*`},
-		{"prefix every word", domain.SessionSearchMatchOptions{NoStemming: true, Prefix: domain.SessionSearchPrefixAll}, `("flaky"* OR "logins"*)`},
-		{"prefix none", domain.SessionSearchMatchOptions{NoStemming: true, Prefix: domain.SessionSearchPrefixNone}, `("flaky" OR "logins")`},
-		{"keep stopwords", domain.SessionSearchMatchOptions{NoStemming: true, KeepStopwords: true}, `("the" OR "flaky" OR "logins"*)`},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			if got := domain.ParseSessionSearchQueryWith("the flaky logins", testCase.options).MatchQuery; got != testCase.want {
-				t.Fatalf("match = %q, want %q", got, testCase.want)
-			}
-		})
-	}
-}
-
 // The exact tier's expression holds each ranked word as typed, so a document
 // with the word itself can outrank one that matches only its stem or a longer
-// word. It is empty when nothing was widened (no stem, no prefix) or for an
-// explicit OR, where it would only cost a second full-text pass.
+// word. It is empty for an explicit OR, where it would only cost a second
+// full-text pass.
 func TestParseSessionSearchQueryExactTier(t *testing.T) {
 	cases := []struct {
 		name, input string
-		options     domain.SessionSearchMatchOptions
 		match       string
 		exact       string
 	}{
-		{"one word, widened to its stem", "rebasing", domain.SessionSearchMatchOptions{}, `"rebas"*`, `"rebasing"`},
-		{"each word as typed", "flaky login", domain.SessionSearchMatchOptions{}, `("flak"* OR "login"*)`, `"flaky" AND "login"`},
-		{"stopwords stay out", "how did we fix the failing login tests?", domain.SessionSearchMatchOptions{},
+		{"one word, widened to its stem", "rebasing", `"rebas"*`, `"rebasing"`},
+		{"each word as typed", "flaky login", `("flak"* OR "login"*)`, `"flaky" AND "login"`},
+		{"stopwords stay out", "how did we fix the failing login tests?",
 			`("fix" OR "fail"* OR "login" OR "test"*)`, `"fix" AND "failing" AND "login" AND "tests?"`},
-		{"a required phrase stays required", `"race condition" flaky`, domain.SessionSearchMatchOptions{},
+		{"a required phrase stays required", `"race condition" flaky`,
 			`"race condition" AND "flak"*`, `"race condition" AND "flaky"`},
-		{"a half-typed word is its own exact form", "notariz", domain.SessionSearchMatchOptions{}, `"notariz"*`, `"notariz"`},
-		{"explicit OR has no tier", "flaky OR login", domain.SessionSearchMatchOptions{}, `"flak"* OR "login"*`, ""},
-		{"nothing widened, nothing to tier", "flaky login",
-			domain.SessionSearchMatchOptions{NoStemming: true, Prefix: domain.SessionSearchPrefixNone}, `("flaky" OR "login")`, ""},
+		{"a half-typed word is its own exact form", "notariz", `"notariz"*`, `"notariz"`},
+		{"explicit OR has no tier", "flaky OR login", `"flak"* OR "login"*`, ""},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			query := domain.ParseSessionSearchQueryWith(testCase.input, testCase.options)
+			query := domain.ParseSessionSearchQuery(testCase.input)
 			if query.MatchQuery != testCase.match || query.ExactQuery != testCase.exact {
 				t.Fatalf("match = %q exact = %q, want %q and %q", query.MatchQuery, query.ExactQuery, testCase.match, testCase.exact)
 			}
@@ -82,12 +55,6 @@ func TestParseSessionSearchQuery(t *testing.T) {
 			check: func(t *testing.T, query domain.SessionSearchParsedQuery) {
 				if query.MatchQuery != `("flak"* OR "login"*)` {
 					t.Fatalf("match = %q", query.MatchQuery)
-				}
-				if query.AllTermsQuery != `"flak"* AND "login"*` {
-					t.Fatalf("all terms = %q", query.AllTermsQuery)
-				}
-				if len(query.Terms) != 2 {
-					t.Fatalf("terms = %v", query.Terms)
 				}
 			},
 		},
@@ -386,19 +353,6 @@ func TestParseSessionSearchQuery(t *testing.T) {
 			},
 		},
 		{
-			name:  "a suffix anchor is recorded",
-			input: "login.ts$",
-			check: func(t *testing.T, query domain.SessionSearchParsedQuery) {
-				if len(query.Suffixes) != 1 || query.Suffixes[0] != "login.ts" {
-					t.Fatalf("suffixes = %v", query.Suffixes)
-				}
-				// The term is still matched so the candidate set is index-driven.
-				if query.MatchQuery != `"login.ts"*` {
-					t.Fatalf("match = %q", query.MatchQuery)
-				}
-			},
-		},
-		{
 			name:  "a pipe joins terms with OR",
 			input: "foo | bar",
 			check: func(t *testing.T, query domain.SessionSearchParsedQuery) {
@@ -516,25 +470,6 @@ func TestSessionSearchSplitIdentifiersIsBounded(t *testing.T) {
 	}
 	if !containsWord(expanded, "bbb") {
 		t.Fatalf("expansion stopped too early: %q", expanded)
-	}
-}
-
-func TestSessionSearchKindTierOrder(t *testing.T) {
-	order := []domain.SessionSearchKind{
-		domain.SessionSearchKindTitle,
-		domain.SessionSearchKindUser,
-		domain.SessionSearchKindPath,
-		domain.SessionSearchKindAssistant,
-		domain.SessionSearchKindTool,
-		domain.SessionSearchKindCommand,
-	}
-	for index := 1; index < len(order); index++ {
-		if domain.SessionSearchKindTier(order[index]) < domain.SessionSearchKindTier(order[index-1]) {
-			t.Fatalf("tier order regressed at %q: %v", order[index], order)
-		}
-	}
-	if domain.SessionSearchKindTier(domain.SessionSearchKindTitle) >= domain.SessionSearchKindTier(domain.SessionSearchKindCommand) {
-		t.Fatal("a title must outrank command output")
 	}
 }
 

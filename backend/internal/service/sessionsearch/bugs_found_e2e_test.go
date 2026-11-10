@@ -305,14 +305,6 @@ func TestALongSessionDoesNotOutrankTheOneNamedForTheQuery(t *testing.T) {
 	if got := sessionIDs(search(t, f.svc, "status endpoint review").Results); strings.Join(got, ",") != ids(named, hub) {
 		t.Fatalf("results = %v, want the session named for the query first", got)
 	}
-	// The unbounded tail is what let volume win; keep the failure visible. The
-	// name tier and the exact tier (its title holds all three words as typed)
-	// would each put the named session first on their own, so both are off.
-	unbounded := searchWith(t, f.svc, "status endpoint review",
-		domain.SessionSearchParams{Ranking: domain.SessionSearchRanking{SessionTailDepth: -1, NameTierOff: true, ExactTierOff: true}})
-	if got := sessionIDs(unbounded.Results); strings.Join(got, ",") != ids(hub, named) {
-		t.Fatalf("unbounded tail = %v; this test no longer reproduces the hub bias it guards against", got)
-	}
 }
 
 // Found on the MacBook Pro's archive: "amp smoke test" put the
@@ -345,12 +337,6 @@ func TestASessionNamedForTheQueryLeadsEvenWithNothingButItsName(t *testing.T) {
 		if len(got) == 0 || got[0] != string(named.ID) {
 			t.Fatalf("%q = %v, want the session named for the query first", query, got)
 		}
-	}
-	// Keep the failure visible: without the tier, volume (or the id) wins.
-	off := searchWith(t, f.svc, "amp smoke test",
-		domain.SessionSearchParams{Ranking: domain.SessionSearchRanking{NameTierOff: true}})
-	if got := sessionIDs(off.Results); len(got) == 0 || got[0] == string(named.ID) {
-		t.Fatalf("tier off = %v; this test no longer reproduces the bias it guards against", got)
 	}
 }
 
@@ -512,11 +498,6 @@ func TestTheWordAsTypedOutranksItsWidenedForms(t *testing.T) {
 	// Word forms still match: a session that only says "rebased" is still found.
 	if len(got.Results) != 2 {
 		t.Fatalf("results = %s, want the widened session still listed", describe(got.Results))
-	}
-	// Without the tier, volume wins: the failure this guards against.
-	off := searchWith(t, f.svc, "rebasing", domain.SessionSearchParams{Ranking: domain.SessionSearchRanking{ExactTierOff: true}})
-	if strings.Join(sessionIDs(off.Results), ",") != ids(busy, exact) {
-		t.Fatalf("exact tier off = %v; this test no longer reproduces the stem bias it guards against", sessionIDs(off.Results))
 	}
 }
 
