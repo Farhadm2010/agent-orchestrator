@@ -215,6 +215,7 @@ type Controller struct {
 	conversation domain.ConversationRecord
 	generation   string
 	harness      domain.AgentHarness
+	started      time.Time
 
 	conv                   ports.ChatConversation
 	store                  Store

@@ -2050,6 +2050,7 @@ function ChatWorkspaceContent({
 							resuming={resumingAgent}
 							resumeError={resumeError}
 							resumeOpenElsewhere={resumeOpenElsewhere}
+							heldElsewhere={snapshot.openElsewhere}
 							harness={snapshot.harness}
 							onOpenShell={onOpenShell}
 							openingShell={openingShell}
@@ -2686,6 +2687,7 @@ function ControllerBanner({
 	resuming,
 	resumeError,
 	resumeOpenElsewhere,
+	heldElsewhere = false,
 	harness,
 	onOpenShell,
 	openingShell,
@@ -2707,6 +2709,7 @@ function ControllerBanner({
 	resuming?: boolean;
 	resumeError?: string;
 	resumeOpenElsewhere?: boolean;
+	heldElsewhere?: boolean;
 	harness?: string;
 	onOpenShell?: () => void;
 	openingShell?: boolean;
@@ -2743,7 +2746,7 @@ function ControllerBanner({
 	// The transition coordinator intentionally stops one controller before it
 	// starts the other. The top-bar handoff state already explains that interval;
 	// presenting its intermediate snapshot as a crash produces a red false alarm.
-	if (controller.state === "ready" || controller.state === "busy" || controller.state === "hibernated") return null;
+	if (controller.state === "ready" || controller.state === "busy" || (controller.state === "hibernated" && !heldElsewhere)) return null;
 	if (controller.state === "stopped" && (transitioning || automaticWakePending)) return null;
 	if (controller.state === "connecting" && quietConnect) return null;
 
@@ -2754,6 +2757,10 @@ function ControllerBanner({
 		},
 		recovering: {
 			title: "Reconnecting to the agent",
+			tone: "text-warning",
+		},
+		hibernated: {
+			title: t("chat.controller.openElsewhere"),
 			tone: "text-warning",
 		},
 		stopped: {
@@ -2798,6 +2805,8 @@ function ControllerBanner({
 					<span className="text-xs leading-snug text-muted-foreground">Restoring the agent. You can keep typing.</span>
 				) : restarting ? (
 					<span className="text-xs leading-snug text-muted-foreground">Orchestrator restarted. History is kept.</span>
+				) : controller.state === "hibernated" ? (
+					<span className="text-xs leading-snug text-muted-foreground">{t("chat.controller.heldElsewhereBody")}</span>
 				) : controller.error ? (
 					<span className="text-xs leading-snug text-muted-foreground">{controller.error}</span>
 				) : null}
