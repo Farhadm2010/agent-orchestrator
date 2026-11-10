@@ -106,6 +106,8 @@ type ConversationsController struct {
 
 // Register mounts the conversation routes under a session.
 func (c *ConversationsController) Register(r chi.Router) {
+	r.Get("/conversations/{conversationId}/find", c.findConversation)
+	r.Get("/conversations/{conversationId}/find-window", c.findConversationWindow)
 	r.Get("/conversations/search", c.searchConversations)
 	r.Patch("/sessions/{sessionId}/conversation/side-chats/{sideId}/label", c.renameSideChat)
 	r.Post("/sessions/{sessionId}/conversation/side-chats/{sideId}/turns/{turnId}/cancel", c.cancelSideQuestion)
@@ -1087,7 +1089,7 @@ func chatUserMessage(req SendConversationMessageRequest, sessionID string) (port
 	for _, excerpt := range req.Excerpts {
 		excerpts = append(excerpts, ports.ChatExcerptReference{
 			ConversationID: excerpt.ConversationID, MessageID: excerpt.MessageID,
-			Revision: excerpt.Revision, Text: excerpt.Text, ID: excerpt.ID, Order: excerpt.Order,
+			Revision: excerpt.Revision, Text: excerpt.Text, ID: excerpt.ID, Order: excerpt.Order, Snapshot: excerpt.Snapshot,
 		})
 	}
 	return ports.ChatUserMessage{
@@ -1139,7 +1141,7 @@ func conversationContent(req SendConversationMessageRequest) ([]ports.ChatConten
 			return nil, &attachmentError{"INVALID_RESOURCE", "resource uri and name are required"}
 		}
 		if resource.URI == ports.ChatInternalReplayResourceURI {
-			return nil, &attachmentError{"INVALID_RESOURCE", "resource uri is reserved for AO internal context"}
+			return nil, &attachmentError{"INVALID_RESOURCE", "resource uri is reserved for Orchestrator internal context"}
 		}
 		kind, text := "resource_link", ""
 		if resource.Text != nil {
@@ -1470,6 +1472,7 @@ func conversationSnapshotResponse(s chatsvc.Snapshot) ConversationSnapshotRespon
 		ConversationID:                   s.Conversation.ID,
 		ActiveBranchID:                   s.Conversation.ActiveBranchID,
 		BranchedFromEarlierMessage:       s.BranchedFromEarlierMessage,
+		BatchedDeliveries:                s.BatchedDeliveries,
 		SessionID:                        string(s.SessionID),
 		Harness:                          string(s.Harness),
 		Mode:                             string(s.Mode),
@@ -1614,18 +1617,19 @@ func conversationContentSummary(msg domain.ConversationMessage) ([]ConversationC
 			summary.AnnotationOrder = ref.Order
 		}
 		if block.Type == "excerpt" {
-			// Excerpts written by current versions carry verified structured
+			// Excerpts written by current versions carry captured structured
 			// context. Older durable messages only have the excerpt resource URI
 			// and selected text; keep those navigable without exposing the
 			// internal URI in the public content summary.
 			summary.Name = "Chat excerpt"
 			if block.Excerpt != nil {
+				summary.Snapshot = excerptSnapshotSummary(block.Excerpt.Reference.Snapshot)
 				summary.AnnotationID = block.Excerpt.Reference.ID
 				summary.AnnotationOrder = block.Excerpt.Reference.Order
 				summary.Text = block.Excerpt.SelectedText
 				summary.SourceConversationID = block.Excerpt.Reference.ConversationID
 				summary.SourceMessageID = block.Excerpt.Reference.MessageID
-				summary.SourceRevision = block.Excerpt.Reference.Revision
+				summary.SourceRevision = &block.Excerpt.Reference.Revision
 			} else {
 				summary.Text = block.Text
 				if strings.HasPrefix(block.URI, ports.ChatExcerptResourceURIPrefix) {
