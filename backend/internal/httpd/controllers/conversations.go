@@ -1514,6 +1514,7 @@ func conversationSnapshotResponse(s chatsvc.Snapshot) ConversationSnapshotRespon
 			StartedAt:       optionalTimestamp(turn.StartedAt),
 			CompletedAt:     optionalTimestamp(turn.CompletedAt),
 			Diff:            turnDiffPayload(turn.Diff),
+			Artifacts:       turnArtifactsPayload(turn.Artifacts),
 			Plan:            turnPlanPayload(turn.Plan),
 			RolledBack:      turn.RolledBackAt != nil,
 		})
@@ -1695,6 +1696,18 @@ func turnDiffPayload(diff *domain.ConversationTurnDiff) *ConversationTurnDiffRes
 			Status:    file.Status,
 			OldPath:   file.OldPath,
 		})
+	}
+	return out
+}
+
+// turnArtifactsPayload maps the artifacts a turn changed onto the wire shape.
+func turnArtifactsPayload(artifacts *domain.ConversationTurnArtifacts) *ConversationTurnArtifactsResponse {
+	if artifacts == nil || len(artifacts.Files) == 0 {
+		return nil
+	}
+	out := &ConversationTurnArtifactsResponse{Files: make([]ConversationTurnArtifactResponse, 0, len(artifacts.Files))}
+	for _, file := range artifacts.Files {
+		out.Files = append(out.Files, ConversationTurnArtifactResponse{Path: file.Path, Status: file.Status})
 	}
 	return out
 }
