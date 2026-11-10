@@ -153,91 +153,21 @@ func (s *Store) AgentAccountUsageSince(ctx context.Context, since time.Time) ([]
 	return out, nil
 }
 
-// sessionAccountUsageBatchSQL is the account usage of session ?1's first ?2
-// usage events in id order (-1 for all of them), attributed to accounts
-// exactly as AgentAccountUsageSince does with since ?3. It starts from the
-// session's bindings: AgentAccountUsageSince filtered by session scans every
-// usage event in the database. Handwritten because sqlc cannot parse a
-// grouped subquery; TestSessionDeleteKeepsAccountUsageInBatches holds the two
-// to the same totals.
-const sessionAccountUsageBatchSQL = `
-SELECT u.account_id, u.day, u.model_id,
-    CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER),
-    CAST(COALESCE(SUM(u.cached_input_tokens), 0) AS INTEGER),
-    CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER),
-    CAST(COALESCE(SUM(u.estimated_cost_nanos), 0) AS INTEGER)
-FROM (
-    SELECT
-        CAST(COALESCE(
-            (SELECT a.account_id FROM session_agent_accounts a
-             WHERE a.session_id = b.session_id
-               AND a.provider = CASE b.harness WHEN 'claude-code' THEN 'claude' ELSE 'codex' END
-               AND a.bound_at <= ev.created_at
-             ORDER BY a.bound_at DESC LIMIT 1),
-            (SELECT a.account_id FROM session_agent_accounts a
-             WHERE a.session_id = b.session_id
-               AND a.provider = CASE b.harness WHEN 'claude-code' THEN 'claude' ELSE 'codex' END
-             ORDER BY a.bound_at ASC LIMIT 1),
-            'device-' || CASE b.harness WHEN 'claude-code' THEN 'claude' ELSE 'codex' END
-        ) AS TEXT) AS account_id,
-        CAST(substr(ev.created_at, 1, 10) AS TEXT) AS day,
-        ev.model_id, ev.input_tokens, ev.cached_input_tokens, ev.output_tokens,
-        ev.estimated_cost_nanos, ev.created_at, b.harness
-    FROM usage_bindings b
-    JOIN model_usage_events ev ON ev.binding_id = b.id
-    WHERE b.session_id = ?1
-    ORDER BY ev.id
-    LIMIT ?2
-) u
-WHERE u.created_at >= ?3 AND u.harness IN ('claude-code', 'codex')
-GROUP BY 1, 2, 3`
-
-// deleteSessionUsageBatchSQL deletes the events sessionAccountUsageBatchSQL
-// just counted: session ?1's first ?2 usage events in id order.
-const deleteSessionUsageBatchSQL = `
-DELETE FROM model_usage_events WHERE id IN (
-    SELECT ev.id FROM usage_bindings b
-    JOIN model_usage_events ev ON ev.binding_id = b.id
-    WHERE b.session_id = ?1
-    ORDER BY ev.id
-    LIMIT ?2
-)`
-
-// foldSessionAccountUsage adds the account usage of session id's first limit
-// usage events (-1 for all) to the deleted-session totals, which keep a
-// deleted session's spend in the agent account usage view. The caller deletes
-// those events in the same transaction.
-func foldSessionAccountUsage(ctx context.Context, tx *sql.Tx, id domain.SessionID, limit int) error {
-	usage, err := sessionAccountUsageBatch(ctx, tx, id, limit)
+// foldDeletedSessionAccountUsage adds a session's usage, attributed to its
+// accounts exactly as AgentAccountUsageSince does, to the deleted-session
+// totals. It runs inside the delete's transaction, before the session row (and
+// with it the usage events and account bindings) cascades away.
+func foldDeletedSessionAccountUsage(ctx context.Context, q *gen.Queries, id domain.SessionID) error {
+	rows, err := q.AgentAccountUsageSince(ctx, gen.AgentAccountUsageSinceParams{
+		Since: sql.NullTime{Time: time.Time{}, Valid: true}, SessionID: string(id),
+	})
 	if err != nil {
 		return err
 	}
-	q := gen.New(tx)
-	for _, row := range usage {
-		if err := q.AddDeletedSessionAccountUsage(ctx, row); err != nil {
+	for _, row := range rows {
+		if err := q.AddDeletedSessionAccountUsage(ctx, gen.AddDeletedSessionAccountUsageParams(row)); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// sessionAccountUsageBatch reads what foldSessionAccountUsage adds. The rows
-// are read to the end and closed before the fold writes on the same
-// transaction.
-func sessionAccountUsageBatch(ctx context.Context, tx *sql.Tx, id domain.SessionID, limit int) ([]gen.AddDeletedSessionAccountUsageParams, error) {
-	rows, err := tx.QueryContext(ctx, sessionAccountUsageBatchSQL, string(id), limit, sql.NullTime{Time: time.Time{}, Valid: true})
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var usage []gen.AddDeletedSessionAccountUsageParams
-	for rows.Next() {
-		var row gen.AddDeletedSessionAccountUsageParams
-		if err := rows.Scan(&row.AccountID, &row.Day, &row.ModelID, &row.InputTokens,
-			&row.CachedInputTokens, &row.OutputTokens, &row.EstimatedCostNanos); err != nil {
-			return nil, err
-		}
-		usage = append(usage, row)
-	}
-	return usage, rows.Err()
 }
