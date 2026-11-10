@@ -1,16 +1,13 @@
 // Package sessionsearch owns the local full-text index over past AO sessions
 // and the ranked query the desktop UI, the Cmd+K palette, and `ao search` share.
 //
-// Two invariants shape the package:
-//
 //   - It is READ-ONLY toward session data. It writes only its own index tables
-//     (session_search_docs, session_search_fts, session_search_sources) and
-//     never modifies a session row, a conversation row, or a provider
+//     and never modifies a session row, a conversation row, or a provider
 //     transcript. Native transcripts are opened read-only and read forward.
 //   - It is incremental and bounded. Chat is re-indexed per conversation only
 //     when its content fingerprint moved; native transcripts advance by byte
 //     offset; backfill walks sessions in pages so the daemon's single writer
-//     connection is never monopolized and memory stays flat on an 8 GB machine.
+//     connection is never monopolized and memory stays flat.
 package sessionsearch
 
 import (
@@ -147,9 +144,6 @@ type Options struct {
 	Namer Namer
 	// PRs resolves a pasted PR URL to its session.
 	PRs PRResolver
-	// Machine is this daemon's host label, recorded on every document so the
-	// machine: operator can filter.
-	Machine string
 	// Now overrides the clock in tests.
 	Now func() time.Time
 	// Logger receives indexer warnings. Nil discards them.
@@ -158,13 +152,12 @@ type Options struct {
 
 // Service indexes session content and answers ranked queries over it.
 type Service struct {
-	store   Store
-	roots   TranscriptRoots
-	namer   Namer
-	prs     PRResolver
-	machine string
-	now     func() time.Time
-	log     *slog.Logger
+	store Store
+	roots TranscriptRoots
+	namer Namer
+	prs   PRResolver
+	now   func() time.Time
+	log   *slog.Logger
 
 	mu           sync.Mutex
 	state        string
@@ -183,7 +176,7 @@ func New(opts Options) *Service {
 	}
 	return &Service{
 		store: opts.Store, roots: opts.Roots, namer: opts.Namer, prs: opts.PRs,
-		machine: opts.Machine, now: now, log: log, state: "ready",
+		now: now, log: log, state: "ready",
 	}
 }
 
@@ -205,7 +198,6 @@ func (s *Service) Search(ctx context.Context, parsed domain.SessionSearchParsedQ
 	}
 	params.ProjectID = firstNonEmpty(parsed.Project, params.ProjectID)
 	params.Harness = firstNonEmpty(parsed.Harness, params.Harness)
-	params.Machine = firstNonEmpty(parsed.Machine, params.Machine)
 	params.Path = firstNonEmpty(parsed.Path, params.Path)
 	if parsed.Status != domain.SessionSearchStatusAny {
 		params.Status = parsed.Status
@@ -357,7 +349,7 @@ func (s *Service) fillMatchCounts(ctx context.Context, hits []domain.SessionSear
 // hasSessionSearchFilter reports whether a query narrows by anything other
 // than words, which is when a query without words is a browse.
 func hasSessionSearchFilter(params domain.SessionSearchParams) bool {
-	return params.SessionID != "" || params.ProjectID != "" || params.Harness != "" || params.Machine != "" ||
+	return params.SessionID != "" || params.ProjectID != "" || params.Harness != "" ||
 		params.Path != "" || params.ExcludeQuery != "" || params.Status != domain.SessionSearchStatusAny ||
 		(params.From != nil && !params.From.IsZero()) || (params.To != nil && !params.To.IsZero())
 }
@@ -408,7 +400,6 @@ func (s *Service) toResults(ctx context.Context, hits []domain.SessionSearchHit)
 			Highlights:     highlights,
 			Rank:           hit.Rank,
 			CreatedAt:      hit.CreatedAt,
-			Machine:        hit.Machine,
 			ResumeCommand:  domain.SessionSearchResumeCommand(hit.SessionID),
 			SessionMatches: hit.SessionMatches,
 			ReviewID:       hit.ReviewID,
@@ -676,7 +667,6 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 			SessionID: string(conversation.SessionID),
 			ProjectID: string(conversation.ProjectID),
 			Harness:   string(conversation.Harness),
-			Machine:   s.machine,
 			Kind:      domain.SessionSearchKindTitle,
 			Title:     title,
 			// The title column carries the name at bm25 weight 8; the body
@@ -713,7 +703,6 @@ func (s *Service) indexChatWithStamp(ctx context.Context, conversation domain.Se
 				SessionID: string(conversation.SessionID),
 				ProjectID: string(conversation.ProjectID),
 				Harness:   string(conversation.Harness),
-				Machine:   s.machine,
 				Kind:      kind,
 				MessageID: message.ID,
 				Seq:       message.Sequence,
@@ -836,18 +825,16 @@ func (s *Service) activityDoc(conversation domain.SessionSearchConversation, act
 	if strings.TrimSpace(body) == "" {
 		return domain.SessionSearchDoc{}, false
 	}
-	// Tool and command rows used to copy the session's touched paths into their
-	// own paths column. path: filters whole sessions, so that copy never helped
-	// a filter, but it gave every tool row the paths column's bm25 weight for
-	// any word in any file the session touched, which let a tool call outrank
-	// the agent's reply about that word. Paths now live only on file changes.
+	// Tool and command rows carry no paths. path: filters whole sessions, and
+	// paths on a tool row would give it the paths column's bm25 weight for any
+	// word in any file the session touched, letting a tool call outrank the
+	// agent's reply about that word. Paths live only on file changes.
 	return domain.SessionSearchDoc{
 		SourceKey: conversationSourceKey(conversation),
 		DocKey:    "activity:" + activity.ID,
 		SessionID: string(conversation.SessionID),
 		ProjectID: string(conversation.ProjectID),
 		Harness:   string(conversation.Harness),
-		Machine:   s.machine,
 		Kind:      kind,
 		MessageID: activity.AnchorMessageID,
 		Seq:       activity.Sequence,
@@ -1022,7 +1009,6 @@ func (s *Service) writeTitleDoc(ctx context.Context, sourceKey string, target do
 		SessionID: string(target.ID),
 		ProjectID: string(target.ProjectID),
 		Harness:   string(target.Harness),
-		Machine:   s.machine,
 		Kind:      domain.SessionSearchKindTitle,
 		Title:     truncateBytes(title, maxTitleBytes),
 		Body: searchableText(strings.TrimSpace(firstNonEmpty(target.LatestPrompt, target.Prompt) + "\n" +

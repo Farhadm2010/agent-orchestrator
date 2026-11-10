@@ -97,9 +97,7 @@ type SessionSearchDoc struct {
 	SessionID string
 	ProjectID string
 	Harness   string
-	// Machine is the host that owns the session.
-	Machine string
-	Kind    SessionSearchKind
+	Kind      SessionSearchKind
 	// MessageID is the Chat timeline anchor a result opens at. Empty for native
 	// transcript documents and for activities with no message bubble.
 	MessageID string
@@ -119,7 +117,7 @@ type SessionSearchDoc struct {
 func (d SessionSearchDoc) Fingerprint() int64 {
 	hasher := fnv.New64a()
 	for _, part := range []string{
-		d.SourceKey, d.DocKey, d.SessionID, d.ProjectID, d.Harness, d.Machine, string(d.Kind), d.MessageID,
+		d.SourceKey, d.DocKey, d.SessionID, d.ProjectID, d.Harness, string(d.Kind), d.MessageID,
 		strconv.FormatInt(d.Seq, 10), d.Title, d.Body, d.Paths, strconv.FormatInt(d.CreatedAt.UnixMilli(), 10),
 	} {
 		_, _ = hasher.Write([]byte(part))
@@ -293,7 +291,6 @@ type SessionSearchParams struct {
 	HighlightTerms []SessionSearchHighlightTerm
 	ProjectID      string
 	Harness        string
-	Machine        string
 	Status         SessionSearchStatusFilter
 	// Path restricts to sessions that touched a path containing this text.
 	Path string
@@ -377,7 +374,6 @@ type SessionSearchHit struct {
 	SessionID string
 	ProjectID string
 	Harness   string
-	Machine   string
 	Kind      SessionSearchKind
 	MessageID string
 	Seq       int64
@@ -426,7 +422,6 @@ type SessionSearchResult struct {
 	CreatedAt   time.Time                `json:"createdAt"`
 	SessionName string                   `json:"sessionName,omitempty"`
 	ProjectName string                   `json:"projectName,omitempty"`
-	Machine     string                   `json:"machine,omitempty"`
 	// SessionState is active, hibernated, terminated, or unknown, so the result
 	// list can say what clicking will do before the click.
 	SessionState string `json:"sessionState,omitempty"`
@@ -519,7 +514,6 @@ type SessionSearchParsedQuery struct {
 	ExcludeQuery string
 	Project      string
 	Harness      string
-	Machine      string
 	Path         string
 	Status       SessionSearchStatusFilter
 	// Sort is set only by a typed sort: operator. Empty leaves the caller's
@@ -599,20 +593,16 @@ func SessionSearchSimilarity(a, b string) float64 {
 // SessionSearchOperatorPrefixes are the filters a query may carry. They are
 // exported so the UI can offer completion without duplicating the list.
 var SessionSearchOperatorPrefixes = []string{
-	"harness:", "project:", "machine:", "path:", "status:", "before:", "after:", "sort:",
+	"harness:", "project:", "path:", "status:", "before:", "after:", "sort:",
 	"created:",
 }
 
 // ParseSessionSearchQuery turns a search box into a structured query.
 //
-// Operators are recognized only at a word boundary and only when their value is
-// non-empty, so a bare "project:" stays a search term instead of silently
-// filtering everything out. A PR URL is recognized anywhere in the input.
-//
-// Token syntax follows fzf, which is what people already know from other
-// tools: "quoted phrase" matches the phrase, 'term matches the exact token
-// (no prefix expansion), ^term anchors at the start of a token, and !term
-// excludes.
+// Operators are recognized only at a word boundary and only with a value, so
+// a bare "project:" stays a search term instead of filtering everything out.
+// A PR URL is recognized anywhere in the input. Token syntax follows fzf:
+// "quoted phrase", 'exact token (no prefix expansion), ^prefix and !exclude.
 func ParseSessionSearchQuery(raw string) SessionSearchParsedQuery {
 	parsed := SessionSearchParsedQuery{}
 	var phrases, prefixes, exacts, excluded, words []string
@@ -631,8 +621,6 @@ func ParseSessionSearchQuery(raw string) SessionSearchParsedQuery {
 				parsed.Harness = value
 			case "project":
 				parsed.Project = value
-			case "machine":
-				parsed.Machine = value
 			case "path":
 				parsed.Path = value
 			case "status":
@@ -812,11 +800,9 @@ func (ref SessionSearchPRRef) Phrase() string {
 // the paths column, which holds the files a session changed. The fragment's
 // parts must appear in order ("src/routes" matches src/routes/status.js) and
 // the last part may be a prefix ("src/rou"). It is empty when the fragment has
-// no letters or digits, which leaves the filter off.
-//
-// It replaces a LIKE scan over every document's body, which took seconds on a
-// real archive and matched any session that merely printed the path (an ls or
-// a grep), while path: promises sessions that touched it.
+// no letters or digits, which leaves the filter off. Matching the paths
+// column, not document bodies, is what keeps path: to sessions that touched a
+// file rather than ones that merely printed its name (an ls or a grep).
 func SessionSearchPathMatch(fragment string) string {
 	parts := strings.FieldsFunc(strings.ToLower(fragment), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
@@ -857,31 +843,22 @@ func parsePRURL(token string) (SessionSearchPRRef, bool) {
 	return SessionSearchPRRef{URL: strings.Join(parts[:7], "/")}, true
 }
 
-// buildMatchExpressions assembles the FTS5 expressions for one query.
+// buildMatchExpressions assembles the FTS5 expressions for one query. Every
+// term is quoted, so input is never read as FTS5 syntax.
 //
-// Every term is quoted, so user input can never be read as FTS5 syntax (a stray
-// quote or a bare "-" would otherwise be a query error).
+// A "quoted phrase", an 'exact token and a ^prefix are required. Plain words
+// are ranked, not required: a question ("how did we fix the flaky login
+// test?") almost never has all of its words in one message, so a strict AND
+// returns nothing. They are joined with OR and bm25 puts a document holding
+// more of them, or rarer ones, first. Two rules keep OR precise:
 //
-// Explicit operators are requirements: a "quoted phrase" (matched whole),
-// 'exact (no prefix expansion) and ^prefix must all match.
+//   - Stopwords are dropped from the ranked words (unless every word is one):
+//     they occur in nearly every message and would admit the whole index. A
+//     phrase keeps its stopwords.
+//   - Only the last word is prefix-matched, the one still being typed;
+//     expanding every word floods the candidates.
 //
-// Plain words are ranked, not required. Requiring every word is what a filter
-// does, and it is wrong for search: a question ("how did we fix the flaky login
-// test?") almost never has every one of its words in a single message, so a
-// strict AND returns nothing. Plain words are joined with OR and bm25 ranks
-// them, so a document holding more of the words, or rarer ones, comes first.
-//
-// Two refinements keep OR precise:
-//
-//   - Stopwords are dropped from the ranked words (unless every word is one),
-//     because "what", "did" and "the" occur in nearly every message and would
-//     admit the whole index as candidates. A phrase keeps its stopwords; quote
-//     to require one.
-//   - Only the last word is prefix-matched. It is the one still being typed;
-//     expanding every word ("i"* matches every token starting with i) floods
-//     the candidates.
-//
-// Each ranked word is matched as a prefix of its Porter stem, so "signatures
+// Each ranked word matches as a prefix of its Porter stem, so "signatures
 // verified" also finds "signature verification". exact is the same words as
 // typed, for the tier that keeps the word itself ahead of its longer forms.
 func buildMatchExpressions(phrases, prefixes, exacts, words []string, useOr bool) (match, exact string, highlights []SessionSearchHighlightTerm) {
@@ -1158,20 +1135,15 @@ func SessionSearchSplitIdentifiers(body string, maxIdentifiers int) string {
 	return builder.String()
 }
 
-// camelCaseParts splits one run of letters/digits at camel-case and acronym
-// boundaries.
+// camelCaseParts splits one run of letters and digits at camel-case and
+// acronym boundaries:
 //
-// Three boundaries matter, and the acronym one is easy to miss:
+//	handleSubmit      -> handle | Submit
+//	ParseHTTPResponse -> Parse | HTTP | Response
 //
-//	handleSubmit   -> handle | Submit        (lower-to-upper)
-//	ParseHTTPResponse -> Parse | HTTP | Response (acronym run, then a new word)
-//	MAX_RETRY      -> MAX | RETRY            (handled by the underscore split)
-//
-// Without the acronym rule, "parseHTTPResponse" only yields
-// "parsehttpresponse", so searching "http" or "response" misses an identifier a
-// person can see in the code. The rule is: a boundary sits before an uppercase
-// rune that follows a lowercase rune, and before the last uppercase rune of a
-// run that is followed by a lowercase rune.
+// A boundary sits before an uppercase rune that follows a lowercase one, and
+// before the last uppercase rune of a run that a lowercase rune follows.
+// Without the second rule "http" would not find parseHTTPResponse.
 func camelCaseParts(chunk string) []string {
 	runes := []rune(chunk)
 	if len(runes) < 2 {

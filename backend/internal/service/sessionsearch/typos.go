@@ -9,19 +9,16 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
-// Typo repair. A word matches as typed, by its stem and as a prefix, so a
-// half-typed word or another form of it is found; a swapped or wrong letter is
-// not, and the query then finds nothing.
-//
-// A word that matches nothing is repaired by looking up close words in the
-// index's own vocabulary, so it can only become a word some session contains:
+// Typo repair. A word matches as typed, by its stem and as a prefix; a swapped
+// or wrong letter matches nothing. Such a word is replaced by a close word
+// from the index's own vocabulary, so it can only become a word some session
+// contains:
 //
 //   - only plain words of typoMinRunes letters or more (phrases, 'exact and
 //     ^anchored terms are taken as written);
 //   - a candidate starts with the same letter, is at most typoLengthSlack
-//     letters shorter, scores typoMinSimilarity or more against the word or,
-//     when longer, against the word's length of its start (one swap in a
-//     ten-letter word is 0.9);
+//     letters shorter, and scores typoMinSimilarity or more against the word
+//     or, when longer, against the word's length of its start;
 //   - the closest candidate wins, then the most common.
 const (
 	typoMinRunes    = 4

@@ -124,7 +124,7 @@ func TestARollbackDeletesOnlyTheDiscardedDocuments(t *testing.T) {
 func TestAChangeTheIndexCannotSeeRecordsTheNewStamp(t *testing.T) {
 	dir := t.TempDir()
 	store := sqlitetest.MustOpenAt(t, dir)
-	svc := sessionsearch.New(sessionsearch.Options{Store: store, Machine: "test-machine", Now: func() time.Time { return testNow }})
+	svc := sessionsearch.New(sessionsearch.Options{Store: store, Now: func() time.Time { return testNow }})
 	ctx := context.Background()
 	session := longConversation(t, store, svc)
 	source := sessionsearch.ChatSourceKey(string(session.ID))

@@ -26,7 +26,6 @@ type sessionSearchResultDTO struct {
 	CreatedAt     string  `json:"createdAt"`
 	SessionName   string  `json:"sessionName"`
 	ProjectName   string  `json:"projectName"`
-	Machine       string  `json:"machine"`
 	SessionState  string  `json:"sessionState"`
 	ResumeCommand string  `json:"resumeCommand"`
 	// SessionMatches counts the session's matched messages in a grouped list.
@@ -74,7 +73,7 @@ type sessionSearchIndexStatusDTO struct {
 // up what it (or another session) already worked out instead of re-deriving it.
 // The query language is the same one the palette and the Search page accept.
 func newSearchCommand(ctx *commandContext) *cobra.Command {
-	var project, harness, machine, status, path, since, until, sortBy string
+	var project, harness, status, path, since, until, sortBy string
 	var limit, offset int
 	var jsonOutput, indexStatus, perMessage bool
 	cmd := &cobra.Command{
@@ -86,7 +85,7 @@ func newSearchCommand(ctx *commandContext) *cobra.Command {
 			"login test\"); word forms match (\"failing\" finds \"failed\"). One score per session blends its name and\n" +
 			"branch with its content: the name weighs most, then your own words and the agent's reply, then tool output.\n" +
 			"Operators work the same way they do in the desktop palette:\n\n" +
-			"  harness:codex  project:api  machine:mac  path:src/auth  status:killed\n" +
+			"  harness:codex  project:api  path:src/auth  status:killed\n" +
 			"  before:2026-08-01  after:2026-07-01  sort:recent\n" +
 			"  \"exact phrase\"   'exact token   ^prefix   !exclude\n\n" +
 			"Use --json for scripting; the result carries the session id and, for a message match, the message id\n" +
@@ -104,7 +103,7 @@ func newSearchCommand(ctx *commandContext) *cobra.Command {
 				return writeIndexStatus(cmd, response)
 			}
 			query := strings.TrimSpace(strings.Join(args, " "))
-			filtersUsed := project != "" || harness != "" || machine != "" || status != "" || path != ""
+			filtersUsed := project != "" || harness != "" || status != "" || path != ""
 			if query == "" && !filtersUsed {
 				return usageError{errors.New("provide a word to search for, a filter, or --index-status")}
 			}
@@ -117,9 +116,6 @@ func newSearchCommand(ctx *commandContext) *cobra.Command {
 			}
 			if harness != "" {
 				params.Set("harness", strings.TrimSpace(harness))
-			}
-			if machine != "" {
-				params.Set("machine", strings.TrimSpace(machine))
 			}
 			if status != "" {
 				normalized := strings.ToLower(strings.TrimSpace(status))
@@ -181,7 +177,6 @@ func newSearchCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&project, "project", "", "Only results from this project id")
 	cmd.Flags().StringVar(&harness, "harness", "", "Only results from this harness, such as claude-code or codex")
-	cmd.Flags().StringVar(&machine, "machine", "", "Only results from this host")
 	cmd.Flags().StringVar(&status, "status", "", "Only sessions in this state: killed, live, or hibernated")
 	cmd.Flags().StringVar(&path, "path", "", "Only sessions that touched a path containing this text")
 	cmd.Flags().StringVar(&since, "since", "", "Only results at or after this date (YYYY-MM-DD) or RFC 3339 time")

@@ -165,7 +165,7 @@ func TestPastedPRURLListsItsSessionFirstThenMentions(t *testing.T) {
 	other := seedChatSession(t, store, "proj", "sess-other", "conv-other")
 	appendUserMessage(t, store, other, "conv-other", "other-msg", "other-turn", "unrelated work on pull requests")
 	svc := sessionsearch.New(sessionsearch.Options{
-		Store: store, Namer: store, Machine: "test-machine", Now: func() time.Time { return testNow },
+		Store: store, Namer: store, Now: func() time.Time { return testNow },
 		PRs: fakePRs{url: string(owner.ID)},
 	})
 	if _, err := svc.IndexAll(context.Background()); err != nil {
@@ -187,7 +187,7 @@ func TestPastedPRURLListsItsSessionFirstThenMentions(t *testing.T) {
 }
 
 // A filter with no words is a browse, and the browse dropped every filter but
-// project, harness, dates and status: "path:x", "machine:x" or "!word" alone
+// project, harness, dates and status: "path:x" or "!word" alone
 // listed every session.
 func TestBrowseAppliesEveryFilter(t *testing.T) {
 	f := newFixture(t, sessionsearch.TranscriptRoots{})
@@ -215,12 +215,6 @@ func TestBrowseAppliesEveryFilter(t *testing.T) {
 	}
 	if got := sessionIDs(search(t, f.svc, "path:src/rou").Results); strings.Join(got, ",") != ids(editor) {
 		t.Fatalf("path: prefix = %v, want the last part to match as a prefix", got)
-	}
-	if got := search(t, f.svc, "machine:another-box"); len(got.Results) != 0 || got.Total != 0 {
-		t.Fatalf("machine: alone = %v (total %d), want nothing from another machine", sessionIDs(got.Results), got.Total)
-	}
-	if got := sessionIDs(search(t, f.svc, "machine:test-machine").Results); len(got) != 2 {
-		t.Fatalf("machine: this machine = %v, want both sessions", got)
 	}
 	if got := sessionIDs(search(t, f.svc, "!tree project:proj").Results); strings.Join(got, ",") != ids(editor) {
 		t.Fatalf("exclusion browse = %v, want the session without the word", got)

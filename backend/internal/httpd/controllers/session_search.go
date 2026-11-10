@@ -78,7 +78,6 @@ type SessionSearchQuery struct {
 	Query     string `query:"q" required:"true" description:"Words to search for, with optional operators such as harness:, project:, status:, before:, after:, path:, !exclude, \"exact phrase\", 'exact, ^prefix."`
 	ProjectID string `query:"projectId,omitempty" description:"Restrict results to one project. Equivalent to project: in q."`
 	Harness   string `query:"harness,omitempty" description:"Restrict results to one agent harness, such as claude-code or codex."`
-	Machine   string `query:"machine,omitempty" description:"Restrict results to one host."`
 	Path      string `query:"path,omitempty" description:"Restrict to sessions that touched a path containing this text."`
 	Status    string `query:"status,omitempty" enum:"killed,live,hibernated" description:"Restrict to one session lifecycle state."`
 	From      string `query:"from,omitempty" description:"Earliest result time, as an RFC 3339 date or date-time."`
@@ -131,7 +130,6 @@ type SessionSearchResult struct {
 	CreatedAt     time.Time                `json:"createdAt"`
 	SessionName   string                   `json:"sessionName,omitempty"`
 	ProjectName   string                   `json:"projectName,omitempty"`
-	Machine       string                   `json:"machine,omitempty"`
 	SessionState  string                   `json:"sessionState,omitempty"`
 	ResumeCommand string                   `json:"resumeCommand,omitempty"`
 	// SessionMatches counts the session's matching messages when results are
@@ -171,7 +169,6 @@ func parseSessionSearchQuery(r *http.Request) (domain.SessionSearchParsedQuery, 
 	params := domain.SessionSearchParams{
 		ProjectID: strings.TrimSpace(values.Get("projectId")),
 		Harness:   strings.TrimSpace(values.Get("harness")),
-		Machine:   strings.TrimSpace(values.Get("machine")),
 		Path:      strings.TrimSpace(values.Get("path")),
 		Status:    domain.SessionSearchStatusFilter(strings.TrimSpace(values.Get("status"))),
 		Limit:     domain.NormalizeSessionSearchLimit(atoiOrZero(values.Get("limit"))),
@@ -180,7 +177,7 @@ func parseSessionSearchQuery(r *http.Request) (domain.SessionSearchParsedQuery, 
 	// A query needs words or a filter. The one exception is an explicit recency
 	// browse, which is what a palette shows before anything is typed.
 	explicitRecents := strings.EqualFold(strings.TrimSpace(values.Get("sort")), string(domain.SessionSearchSortRecent))
-	if raw == "" && params.ProjectID == "" && params.Harness == "" && params.Machine == "" &&
+	if raw == "" && params.ProjectID == "" && params.Harness == "" &&
 		params.Path == "" && params.Status == "" && !explicitRecents {
 		return domain.SessionSearchParsedQuery{}, domain.SessionSearchParams{},
 			apierr.Invalid("SESSION_SEARCH_QUERY_REQUIRED",
@@ -300,7 +297,6 @@ func sessionSearchResults(results []domain.SessionSearchResult) []SessionSearchR
 			CreatedAt:      item.CreatedAt,
 			SessionName:    item.SessionName,
 			ProjectName:    item.ProjectName,
-			Machine:        item.Machine,
 			SessionState:   item.SessionState,
 			ResumeCommand:  item.ResumeCommand,
 			SessionMatches: item.SessionMatches,

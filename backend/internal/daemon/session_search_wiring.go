@@ -36,25 +36,14 @@ func startSessionSearch(ctx context.Context, store *sqlite.Store, stateDir strin
 		logger.Warn("session search: transcript roots unavailable; native transcripts will not be indexed", "err", err)
 	}
 	service := sessionsearch.New(sessionsearch.Options{
-		Store:   store,
-		Roots:   roots,
-		Namer:   store,
-		PRs:     store,
-		Machine: hostLabel(),
-		Logger:  logger,
+		Store:  store,
+		Roots:  roots,
+		Namer:  store,
+		PRs:    store,
+		Logger: logger,
 	})
 	go runSessionSearch(ctx, service, logger)
 	return service
-}
-
-// hostLabel is this machine's name, recorded on every document so the
-// machine: operator has something to match.
-func hostLabel() string {
-	host, err := os.Hostname()
-	if err != nil || strings.TrimSpace(host) == "" {
-		return "local"
-	}
-	return host
 }
 
 // sessionSearchRoots resolves the provider-owned transcript directories. They

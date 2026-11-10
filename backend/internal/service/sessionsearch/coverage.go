@@ -9,16 +9,12 @@ import (
 // What a tool call, a tool result and reasoning contribute to the index, the
 // same for every source (AO Chat, Claude Code, Codex, OpenCode):
 //
-//   - A tool call is its name and one argument: the first of
-//     toolArgumentKeys that holds text, cut to toolArgumentChars. What a
-//     person remembers about a call is the command it ran, the file it read or
-//     the pattern it searched; edit contents and the rest of the arguments are
-//     not indexed.
+//   - A tool call is its name and one argument: the first of toolArgumentKeys
+//     that holds text, cut to toolArgumentChars. That is what a person
+//     remembers about a call: the command, the file or the pattern.
 //   - A tool result keeps its first toolOutputChars. Logs and file dumps
-//     would be most of the index's size while adding little that is searched.
-//   - Reasoning (Claude thinking, Codex and OpenCode reasoning, AO Chat
-//     reasoning activities) is not indexed. It restates the turn's reply and
-//     plan, and it is the model talking to itself, not what anyone searches.
+//     would be most of the index while adding little that is searched.
+//   - Reasoning is not indexed. It restates the turn's reply and plan.
 //
 // Messages, plans, titles and file paths are not cut by these rules.
 const (

@@ -33,7 +33,6 @@ func TestSearchSendsQueryAndFilters(t *testing.T) {
 		"search", "flaky", "login",
 		"--project", "proj",
 		"--harness", "claude-code",
-		"--machine", "mac",
 		"--status", "terminated",
 		"--path", "src/auth",
 		"--since", "2026-08-01",
@@ -51,7 +50,7 @@ func TestSearchSendsQueryAndFilters(t *testing.T) {
 	if values["q"] != "flaky login" {
 		t.Fatalf("q = %q, want the joined words", values["q"])
 	}
-	if values["projectId"] != "proj" || values["harness"] != "claude-code" || values["machine"] != "mac" {
+	if values["projectId"] != "proj" || values["harness"] != "claude-code" {
 		t.Fatalf("filters = %+v", values)
 	}
 	if values["status"] != "killed" {

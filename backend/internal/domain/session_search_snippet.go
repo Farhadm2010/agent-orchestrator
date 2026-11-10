@@ -37,12 +37,10 @@ const sessionSearchSnippetTokens = 14
 // SessionSearchSnippet returns the part of text that best shows why it matched,
 // with each matched token bracketed by SessionSearchSnippetStart/End.
 //
-// It replaces FTS5's snippet() for result pages. snippet() re-runs the full
-// MATCH, and for a prefix term FTS5 rebuilds the merged posting list of every
-// token sharing the prefix on each run: on a 22,000-document archive that was
-// 600 ms of a 900 ms keystroke. The page's rows already carry their text, so the
-// snippet is cut here instead, with the same tokenization rules as the index
-// (unicode61: letters and digits form tokens, case and diacritics fold).
+// It replaces FTS5's snippet(), which re-runs the full MATCH per call and, for
+// a prefix term, rebuilds the merged posting list every time. The page's rows
+// already carry their text, so the snippet is cut here with the index's
+// tokenization rules (unicode61: letters and digits, case and diacritics fold).
 //
 // The window is the run of sessionSearchSnippetTokens tokens holding the most
 // distinct query terms, then the most matches, then the earliest; it starts a

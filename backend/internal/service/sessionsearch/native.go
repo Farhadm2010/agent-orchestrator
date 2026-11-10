@@ -49,7 +49,7 @@ const nativeFormat = "native-v5"
 // nativeDocs turns one parsed unit into its documents. A tool row is already
 // within its caps (coverage.go) and stays one document; a long message is
 // split into chunks.
-func nativeDocs(sourceKey string, target domain.SessionSearchTarget, machine string, line nativeLine, now time.Time) []domain.SessionSearchDoc {
+func nativeDocs(sourceKey string, target domain.SessionSearchTarget, line nativeLine, now time.Time) []domain.SessionSearchDoc {
 	var chunks []string
 	switch line.kind {
 	case domain.SessionSearchKindCommand, domain.SessionSearchKindTool, domain.SessionSearchKindPath:
@@ -78,7 +78,6 @@ func nativeDocs(sourceKey string, target domain.SessionSearchTarget, machine str
 			SessionID: string(target.ID),
 			ProjectID: string(target.ProjectID),
 			Harness:   string(target.Harness),
-			Machine:   machine,
 			Kind:      line.kind,
 			Seq:       line.offset,
 			Body:      body,
@@ -213,7 +212,7 @@ func (s *Service) planNativeSession(ctx context.Context, target domain.SessionSe
 	plan.now = s.now()
 	docs := make([]domain.SessionSearchDoc, 0, len(lines)+1)
 	for _, line := range lines {
-		docs = append(docs, nativeDocs(plan.sourceKey, target, s.machine, line, plan.now)...)
+		docs = append(docs, nativeDocs(plan.sourceKey, target, line, plan.now)...)
 	}
 	// The session's own name and prompt make it findable even when the provider
 	// transcript holds nothing (or the session is a TUI session whose transcript
@@ -225,7 +224,6 @@ func (s *Service) planNativeSession(ctx context.Context, target domain.SessionSe
 			SessionID: string(target.ID),
 			ProjectID: string(target.ProjectID),
 			Harness:   string(target.Harness),
-			Machine:   s.machine,
 			Kind:      domain.SessionSearchKindTitle,
 			Title:     truncateBytes(title, maxTitleBytes),
 			Body:      searchableText(firstNonEmpty(target.LatestPrompt, target.Prompt)),
@@ -808,14 +806,13 @@ func codexHasItemStream(path string) bool {
 
 // codexParser reads one Codex rollout.
 //
-// Newer Codex writes every message and command twice: once in the item stream
-// (event_msg item_completed, what its UI shows) and once as a response_item.
-// Reading both indexed each one twice, which doubled a session's match count
-// and let one message outrank another by repetition. A rollout with an item
-// stream is read from that stream only: its user messages are what the person
-// typed (the response_item ones also carry injected environment and
-// instructions), and it is the stream with file changes and MCP calls. A rollout
-// without one (older Codex) is read from its response_items.
+// Newer Codex writes every message and command twice: in the item stream
+// (event_msg item_completed, what its UI shows) and as a response_item.
+// Reading both would index each one twice. A rollout with an item stream is
+// read from that stream only: its user messages are what the person typed
+// (the response_item ones also carry injected environment and instructions),
+// and it holds the file changes and MCP calls. An older rollout without one
+// is read from its response_items.
 func codexParser(itemStream bool) nativeParser {
 	return func(line []byte) []nativeLine { return parseCodexTranscriptLine(line, itemStream) }
 }

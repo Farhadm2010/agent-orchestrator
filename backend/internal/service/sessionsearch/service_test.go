@@ -25,9 +25,8 @@ func newFixture(t *testing.T, roots sessionsearch.TranscriptRoots) fixture {
 	t.Helper()
 	store := sqlitetest.MustOpen(t)
 	svc := sessionsearch.New(sessionsearch.Options{
-		Store:   store,
-		Roots:   roots,
-		Machine: "test-machine",
+		Store: store,
+		Roots: roots,
 		// The daemon wires the store as the namer, so names and session state
 		// resolve in production. The fixture must do the same or a test can pass
 		// while the shipped surface shows an empty state.
@@ -447,14 +446,6 @@ func TestSearchAppliesProjectHarnessAndDateFilters(t *testing.T) {
 	if len(byHarness.Results) != 0 {
 		t.Fatalf("harness filter = %+v", byHarness.Results)
 	}
-	byMachine := search(t, f.svc, "needle machine:test-machine")
-	if len(byMachine.Results) != 1 {
-		t.Fatalf("machine filter = %+v", byMachine.Results)
-	}
-	byOtherMachine := search(t, f.svc, "needle machine:other-machine")
-	if len(byOtherMachine.Results) != 0 {
-		t.Fatalf("other machine filter = %+v", byOtherMachine.Results)
-	}
 	byDate := search(t, f.svc, "needle after:2027-01-01")
 	if len(byDate.Results) != 0 {
 		t.Fatalf("after: filter = %+v", byDate.Results)
@@ -858,7 +849,7 @@ func TestFailedBackfillReportsUnavailableUntilARetrySucceeds(t *testing.T) {
 	store := sqlitetest.MustOpen(t)
 	flaky := &failingTargetsStore{Store: store, fail: true}
 	svc := sessionsearch.New(sessionsearch.Options{
-		Store: flaky, Machine: "test-machine", Namer: store,
+		Store: flaky, Namer: store,
 		Now: func() time.Time { return testNow },
 	})
 	ctx := context.Background()

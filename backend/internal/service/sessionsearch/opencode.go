@@ -188,11 +188,9 @@ ORDER BY COALESCE(time_created, 0), id`, sessionID)
 
 // openCodeMessageUnits reads one session_message row of the newer schema.
 //
-// An assistant row is a list of parts, and most of a session is not its text:
-// on a real database 2.9 MB of 4.4 MB was tool parts (shell commands and their
-// output, files written and edited, web fetches) and 1 MB reasoning, against
-// 47 KB of prose. Reading only the text parts left nearly all of it
-// unsearchable. Each part is its own unit, with the kind AO Chat gives the same
+// An assistant row is a list of parts, and most of a session is tool parts
+// (shell commands and their output, files written and edited, web fetches),
+// not prose. Each part is its own unit, with the kind AO Chat gives the same
 // thing: a command and its output, a file change with its path, a tool call,
 // or prose. Reasoning parts are not indexed (coverage.go).
 func openCodeMessageUnits(role, data string) []nativeLine {
@@ -370,7 +368,7 @@ func (s *Service) indexOpenCodeSession(ctx context.Context, target domain.Sessio
 	now := s.now()
 	docs := make([]domain.SessionSearchDoc, 0, len(lines)+1)
 	for _, line := range lines {
-		docs = append(docs, nativeDocs(sourceKey, target, s.machine, line, now)...)
+		docs = append(docs, nativeDocs(sourceKey, target, line, now)...)
 	}
 	if title := strings.TrimSpace(target.DisplayName); title != "" {
 		docs = append(docs, domain.SessionSearchDoc{
@@ -379,7 +377,6 @@ func (s *Service) indexOpenCodeSession(ctx context.Context, target domain.Sessio
 			SessionID: string(target.ID),
 			ProjectID: string(target.ProjectID),
 			Harness:   string(target.Harness),
-			Machine:   s.machine,
 			Kind:      domain.SessionSearchKindTitle,
 			Title:     truncateBytes(title, maxTitleBytes),
 			Body:      searchableText(firstNonEmpty(target.LatestPrompt, target.Prompt)),

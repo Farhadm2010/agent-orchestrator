@@ -6070,12 +6070,6 @@ paths:
           description: Restrict results to one agent harness, such as claude-code
             or codex.
           type: string
-      - description: Restrict results to one host.
-        in: query
-        name: machine
-        schema:
-          description: Restrict results to one host.
-          type: string
       - description: Restrict to sessions that touched a path containing this text.
         in: query
         name: path
@@ -21733,8 +21727,6 @@ components:
           - tool
           - command
           - path
-          type: string
-        machine:
           type: string
         messageId:
           type: string

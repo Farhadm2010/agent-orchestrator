@@ -31,7 +31,6 @@ const sessionSearchFilterSQL = `
   AND d.session_id NOT IN (SELECT session_id FROM session_search_deleted)
   AND (? = '' OR d.project_id = ?)
   AND (? = '' OR d.harness = ?)
-  AND (? = '' OR d.machine = ?)
   AND (? = '' OR d.session_id = ?)
   -- path: and !term filter SESSIONS, not documents. A person asking for
   -- "sessions that touched src/upload" means the session, not the one row that
@@ -68,7 +67,6 @@ func sessionSearchFilterArgs(params domain.SessionSearchParams) []any {
 	return []any{
 		params.ProjectID, params.ProjectID,
 		params.Harness, params.Harness,
-		params.Machine, params.Machine,
 		params.SessionID, params.SessionID,
 		pathMatch, pathMatch,
 		params.ExcludeQuery, params.ExcludeQuery,
@@ -80,12 +78,11 @@ func sessionSearchFilterArgs(params domain.SessionSearchParams) []any {
 // browseSessionFilterSQL is the WHERE clause of a browse (filters, no words)
 // and of its count. It applies every filter the ranked search applies, against
 // the sessions table aliased as s: a browse that dropped one (a pasted PR's
-// session, path:, machine:, !term) listed every session instead.
+// session, path:, !term) listed every session instead.
 const browseSessionFilterSQL = `
 WHERE (? = '' OR s.project_id = ?)
   AND (? = '' OR s.harness = ?)
   AND (? = '' OR s.id = ?)
-  AND (? = '' OR s.id IN (SELECT m.session_id FROM session_search_docs m WHERE m.machine = ?))
   AND (? = '' OR s.id IN (
       SELECT p.session_id FROM session_search_docs p
       WHERE p.id IN (SELECT rowid FROM session_search_fts WHERE session_search_fts MATCH ?)
@@ -117,7 +114,6 @@ func browseSessionFilterArgs(params domain.SessionSearchParams) []any {
 		params.ProjectID, params.ProjectID,
 		params.Harness, params.Harness,
 		params.SessionID, params.SessionID,
-		params.Machine, params.Machine,
 		pathMatch, pathMatch,
 		params.ExcludeQuery, params.ExcludeQuery,
 		from, from, to, to,
@@ -127,41 +123,29 @@ func browseSessionFilterArgs(params domain.SessionSearchParams) []any {
 
 // searchSessionSearchDocsSQL ranks candidates and returns one page.
 //
-// Scoring is bm25 throughout. FTS5's bm25 (k1 = 1.2, b = 0.75) weights the
-// title column above paths above body, and the document's kind multiplies the
-// score (a field boost; see domain.SessionSearchKindWeights). FTS5 scores are
-// negative, better is more negative, so a weight above 1 promotes and
-// ascending order is best-first.
+// Scoring is bm25 throughout. FTS5's bm25 weights the title column above paths
+// above body, and the document's kind multiplies the score
+// (domain.SessionSearchKindWeights). FTS5 scores are negative, better is more
+// negative, so a weight above 1 promotes and ascending order is best-first.
 //
 // Order, most significant first:
 //
 //  1. name: grouped by session, sessions whose name holds every typed word
-//     come first (sessionsNamedFor). A name match is the strongest evidence
-//     of the session meant, and bm25 cannot see it: a session with nothing
-//     indexed but its name, or one mentioned hundreds of times elsewhere,
-//     would otherwise lose to volume.
+//     come first (sessionsNamedFor). bm25 cannot see a name match: a session
+//     with nothing indexed but its name, or one mentioned hundreds of times
+//     elsewhere, would otherwise lose to volume.
 //  2. exact: candidates that hold every ranked word as typed come before
 //     those that match only a widened form (the stem's prefix, or a longer
-//     word). The match widens each word so "verified" finds "verification",
-//     but bm25 cannot tell the widened match from the word itself, so a
-//     session repeating "rebased" outranked the one that said "rebasing". For
-//     a grouped session, any one exact document lifts the session, and that
-//     document is the row it is shown as.
+//     word), which bm25 cannot tell apart. For a grouped session, any one
+//     exact document lifts the session and is the row it is shown as.
 //  3. rank: the weighted bm25 score (for a grouped session, its best document
 //     plus a quarter of the rest; domain.SessionSearchTailWeight).
 //  4. recency, then id, so equal scores keep a stable order while typing.
 //
-// Collapsing: when grouped, each session contributes its single best document
-// (ROW_NUMBER over the session partition, using the same order), and carries
-// how many documents in it matched. Without it one long session can fill a
-// whole page, and the palette shows only eight rows. The match count lets the
-// row say "+N more in this session".
-//
-// Snippets are not computed by FTS5. snippet() re-runs the match per call, and
-// for a prefix term that rebuilds a merged posting list each time; the page's
-// rows return their text instead and domain.SessionSearchSnippet cuts it. The
-// total is COUNT(*) OVER () on the collapsed rows, before LIMIT, so the page
-// does not need a second full-text pass to report "12 of 47".
+// When grouped, each session contributes its single best document, so one
+// long session cannot fill a page. Snippets are cut from the page's rows by
+// domain.SessionSearchSnippet, and the total is COUNT(*) OVER () on the
+// collapsed rows before LIMIT, so neither needs a second full-text pass.
 const searchSessionSearchDocsSQL = `
 WITH candidates AS (
     -- Stage one: FTS5 alone ranks the matches by raw bm25 and keeps the best
@@ -273,7 +257,7 @@ page AS (
 -- live in Chat, which is when the app shows that transcript; otherwise the
 -- result opens the session itself rather than a reviewer chat that cannot
 -- render, so it carries neither the review id nor a message to scroll to.
-SELECT p.id, d.session_id, d.project_id, d.harness, d.machine, d.kind,
+SELECT p.id, d.session_id, d.project_id, d.harness, d.kind,
        CASE WHEN d.source_key LIKE 'review:%' AND rv.id IS NULL THEN '' ELSE d.message_id END,
        d.seq,
        COALESCE(t.title, ''), d.created_at, p.score, p.session_matches,
@@ -293,7 +277,7 @@ ORDER BY p.recency DESC, p.name_tier ASC, p.order_exact_tier ASC, p.score ASC, p
 // browse view is about finding sessions, not documents. Documents that exist
 // for the session supply a preview snippet when there is one.
 const browseSessionSearchDocsSQL = `
-SELECT s.id, COALESCE(s.project_id, ''), s.harness, '',
+SELECT s.id, COALESCE(s.project_id, ''), s.harness,
        'title', '', 0,
        COALESCE(NULLIF(s.display_name, ''), s.id),
        ` + sessionCreatedMillisSQL + `,
@@ -330,7 +314,7 @@ const latestChangeMillisSQL = "CAST(COALESCE(strftime('%s', substr(MAX(t.at), 1,
 // sessionSearchFiltered reports whether a query filters documents after the
 // full-text match, which is when the candidate cap must not apply.
 func sessionSearchFiltered(params domain.SessionSearchParams) bool {
-	return params.ProjectID != "" || params.Harness != "" || params.Machine != "" || params.SessionID != "" ||
+	return params.ProjectID != "" || params.Harness != "" || params.SessionID != "" ||
 		params.Path != "" || params.ExcludeQuery != "" || params.Status != domain.SessionSearchStatusAny ||
 		(params.From != nil && !params.From.IsZero()) || (params.To != nil && !params.To.IsZero())
 }
@@ -338,21 +322,17 @@ func sessionSearchFiltered(params domain.SessionSearchParams) bool {
 // SearchSessionSearchDocs ranks candidates and returns one page.
 //
 // Stage one keeps the best sessionSearchCandidateCap documents by raw bm25,
-// which is what keeps a broad query fast. The cap is only safe when nothing
-// after stage one can discard a candidate: a filter could reject all 2,000 and
-// hide matches that exist, and a recency sort wants the newest, not the most
-// relevant, so both run uncapped. A deleted session's documents, which every
-// query discards, are left out inside stage one for the same reason.
+// which keeps a broad query fast. The cap is only safe when nothing after it
+// can discard a candidate, so a filtered query and a recency sort run
+// uncapped, and a deleted session's documents are left out inside stage one.
 //
-// The total counts every match, so every page it advertises must be fetchable,
-// and each result must appear exactly once across them. Every page therefore
-// comes from one ranked list: the capped candidates first, in their final
-// order, then everything the cap left out, in the same final order, excluding
-// what the capped part already returned. Re-ranking a late page without the
-// cap would not do: the cap selects by raw bm25, the final order also applies
-// kind weights and tiers, so the two orders disagree and a page past the cap
-// repeated earlier results and never reached others. Pages inside the capped
-// candidates, which nearly every search is, cost one capped pass as before.
+// The total counts every match, so every page it advertises must be fetchable
+// and each result must appear exactly once. Every page therefore comes from
+// one ranked list: the capped candidates in their final order, then everything
+// the cap left out in the same order, excluding what the capped part returned.
+// Re-ranking a late page without the cap would not do: the cap selects by raw
+// bm25 and the final order also applies kind weights and tiers, so the two
+// orders disagree. Pages inside the cap, nearly all of them, cost one pass.
 func (s *Store) SearchSessionSearchDocs(ctx context.Context, params domain.SessionSearchParams) ([]domain.SessionSearchHit, error) {
 	capped := sessionSearchCandidateCap
 	if params.Sort == domain.SessionSearchSortRecent || sessionSearchFiltered(params) {
@@ -476,7 +456,7 @@ func (s *Store) searchSessionSearchDocs(ctx context.Context, params domain.Sessi
 		var kind string
 		var body []byte
 		if err := rows.Scan(
-			&docID, &hit.SessionID, &hit.ProjectID, &hit.Harness, &hit.Machine, &kind, &hit.MessageID, &hit.Seq,
+			&docID, &hit.SessionID, &hit.ProjectID, &hit.Harness, &kind, &hit.MessageID, &hit.Seq,
 			&hit.Title, &createdAt, &hit.Rank, &hit.SessionMatches, &body, &hit.MatchTotal, &candidates,
 			&hit.ReviewID,
 		); err != nil {
@@ -558,7 +538,7 @@ func (s *Store) BrowseSessionSearchDocs(ctx context.Context, params domain.Sessi
 		var kind string
 		var preview []byte
 		if err := rows.Scan(
-			&hit.SessionID, &hit.ProjectID, &hit.Harness, &hit.Machine, &kind, &hit.MessageID, &hit.Seq,
+			&hit.SessionID, &hit.ProjectID, &hit.Harness, &kind, &hit.MessageID, &hit.Seq,
 			&hit.Title, &createdAt, &hit.Rank, &preview,
 		); err != nil {
 			return nil, fmt.Errorf("scan session search browse row: %w", err)
@@ -629,14 +609,13 @@ func (s *Store) CountSessionSearchDocs(ctx context.Context) (int64, error) {
 
 const upsertSessionSearchDocSQL = `
 INSERT INTO session_search_docs (
-    source_key, doc_key, session_id, project_id, harness, machine, kind, message_id, seq,
+    source_key, doc_key, session_id, project_id, harness, kind, message_id, seq,
     created_at, indexed_at, fingerprint
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (source_key, doc_key, kind) DO UPDATE SET
     session_id = excluded.session_id,
     project_id = excluded.project_id,
     harness = excluded.harness,
-    machine = excluded.machine,
     message_id = excluded.message_id,
     seq = excluded.seq,
     created_at = excluded.created_at,
@@ -648,11 +627,10 @@ RETURNING id;`
 // index and the projection advance together and a batch costs one commit.
 //
 // The index is contentless, so a changed document's old index row is removed
-// with FTS5's 'delete' command and the text it was indexed with, read from
-// session_search_text before that text is overwritten. Text and index rows are
-// then written one statement each: FTS5 flushes its pending terms whenever
-// another statement opens a savepoint in the same transaction, and written one
-// document at a time, each document became its own index segment to merge.
+// with FTS5's 'delete' command and the text it was indexed with, read before
+// that text is overwritten. Text and index rows are then written one statement
+// each: FTS5 flushes its pending terms whenever another statement opens a
+// savepoint, which would make each document its own segment to merge.
 // Documents whose hash is unchanged keep their index rows.
 func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.SessionSearchDoc) error {
 	if len(docs) == 0 {
@@ -675,7 +653,7 @@ func (s *Store) UpsertSessionSearchDocs(ctx context.Context, docs []domain.Sessi
 		for index, doc := range docs {
 			if err := docStmt.QueryRowContext(ctx,
 				doc.SourceKey, doc.DocKey, doc.SessionID, doc.ProjectID, doc.Harness,
-				doc.Machine, string(doc.Kind), doc.MessageID, doc.Seq,
+				string(doc.Kind), doc.MessageID, doc.Seq,
 				doc.CreatedAt.UnixMilli(), doc.IndexedAt.UnixMilli(), prepared[index].fingerprint,
 			).Scan(&ids[index]); err != nil {
 				return fmt.Errorf("upsert session search doc %s/%s: %w", doc.SourceKey, doc.DocKey, err)
@@ -988,12 +966,10 @@ const sessionSearchMissingBatch = 256
 // holds that the app database does not have, and returns how many it recorded.
 //
 // A session delete records itself (the sessions_search_ad trigger). This is
-// for an index that outlived its database's history. A backup of ao.db keeps
-// the owner token, so restored beside the current search.db it passes the
-// owner check (search_db.go) while the index still holds sessions created
-// after the backup. Nothing recorded those as deleted, so they stayed in
-// results for good. Recorded here, search ignores them at once and the sweep
-// removes their documents, exactly as for a deleted session.
+// for an index that outlived its database's history: a restored backup of
+// ao.db keeps the owner token, so it passes the owner check (search_db.go)
+// while the index still holds sessions created after the backup. Recorded
+// here, search ignores them at once and the sweep removes their documents.
 func (s *Store) MarkSessionSearchSessionsMissing(ctx context.Context) (int, error) {
 	rows, err := s.readDB.QueryContext(ctx, `
 SELECT held.session_id FROM (

@@ -13,26 +13,20 @@ import (
 // The session search index lives in its own database file, search.db, beside
 // ao.db.
 //
-// SQLite allows one writer per database file. Indexing writes a lot (a long
-// conversation is thousands of documents, and FTS5 merges its segments inside
-// whichever commit crosses a threshold), and in ao.db every one of those
-// transactions made the daemon's other writes (chat streaming, session state)
-// wait: an index rebuild held the lock for up to a second at a time, and even
-// small batches had 30 to 140 ms tails from merges and checkpoints. In its own
-// file the index holds only its own write lock, which nothing else takes, so
-// no app write ever waits for search.
+// SQLite allows one writer per database file. Indexing writes a lot, and FTS5
+// merges its segments inside whichever commit crosses a threshold, so in ao.db
+// those transactions would make the daemon's other writes (chat streaming,
+// session state) wait. In its own file the index holds only its own write
+// lock, which nothing else takes.
 //
-// Reads are unchanged: every reader connection attaches search.db, and SQLite
-// resolves the index's table names in the attached file, so a query can still
-// filter documents by the sessions they belong to. WAL readers never wait for
-// a writer in either file.
+// Reads are unchanged: every reader connection attaches search.db, so a query
+// can still filter documents by the sessions they belong to.
 //
 // The index is derived data. A schema change bumps searchSchemaVersion, which
-// clears the file and lets the indexer rebuild it from the sessions; ao.db
-// migrations never have to touch it. search.db also records which ao.db it
-// indexes (session_search_owner's token): beside a restored or swapped ao.db
-// it is cleared the same way, so it never describes sessions that are not
-// there.
+// clears the file and lets the indexer rebuild it; ao.db migrations never
+// touch it. search.db also records which ao.db it indexes
+// (session_search_owner's token): beside a restored or swapped ao.db it is
+// cleared the same way.
 const (
 	searchDatabaseFile = "search.db"
 	// searchSchemaName is the name search.db is attached under.
@@ -161,8 +155,6 @@ var createSearchSchema = []string{
     session_id  TEXT NOT NULL DEFAULT '',
     project_id  TEXT NOT NULL DEFAULT '',
     harness     TEXT NOT NULL DEFAULT '',
-    -- machine is the host that owns the session.
-    machine     TEXT NOT NULL DEFAULT '',
     -- kind is what the row is; ranking weighs bm25 by it.
     kind        TEXT NOT NULL CHECK (kind IN (
         'title', 'user', 'assistant', 'tool', 'command', 'path'

@@ -85,7 +85,6 @@ func TestSearchSessionsReturnsRankedResults(t *testing.T) {
 			CreatedAt:     created,
 			SessionName:   "Fix the login test",
 			ProjectName:   "proj",
-			Machine:       "mac",
 			SessionState:  "terminated",
 			ResumeCommand: "ao session resume-agent proj-1",
 		}},

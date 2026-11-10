@@ -3,22 +3,16 @@ package domain
 // PorterStem returns the Porter stem of one lowercase English word: "failing",
 // "failed" and "fails" all stem to "fail"; "signatures" to "signatur".
 //
-// This is M. F. Porter's algorithm ("An algorithm for suffix stripping",
-// Program 14(3), 1980) transliterated from his reference C implementation,
-// including that implementation's two documented departures from the paper
-// (bli -> ble and logi -> log in step 2). It is verified against Porter's own
-// 23,531-word test vocabulary (session_search_stem_test.go), which is the only
-// meaningful definition of "a correct Porter stemmer".
+// It is M. F. Porter's algorithm ("An algorithm for suffix stripping", 1980)
+// transliterated from his reference C implementation, including its two
+// departures from the paper (bli -> ble and logi -> log in step 2).
 //
-// The index itself is not stemmed. FTS5's porter tokenizer stems prefix
-// queries too, so a half-typed word in the palette ("authenti") would stop
-// matching ("authentication" is indexed as "authent"). Instead the query side
-// matches the stem as a prefix: "signatures" becomes "signatur"*, which FTS5
-// scores as one term whose document frequency spans every form, the way a
-// stemmed index would. See buildMatchExpressions.
+// The index itself is not stemmed: FTS5's porter tokenizer stems prefix
+// queries too, so a half-typed word ("authenti") would stop matching
+// ("authentication" is indexed as "authent"). The query side matches the stem
+// as a prefix instead (see buildMatchExpressions).
 //
-// Words that are not all a-z (identifiers with digits, non-English text) are
-// returned unchanged: the algorithm is defined for English letters only.
+// Words that are not all a-z are returned unchanged.
 func PorterStem(word string) string {
 	if len(word) <= 2 {
 		return word

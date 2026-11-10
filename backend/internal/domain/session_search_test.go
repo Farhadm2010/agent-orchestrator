@@ -151,10 +151,10 @@ func TestParseSessionSearchQuery(t *testing.T) {
 			},
 		},
 		{
-			name:  "machine and path operators filter",
-			input: "retry machine:mac path:src/auth",
+			name:  "the path operator filters",
+			input: "retry path:src/auth",
 			check: func(t *testing.T, query domain.SessionSearchParsedQuery) {
-				if query.Machine != "mac" || query.Path != "src/auth" {
+				if query.Path != "src/auth" {
 					t.Fatalf("query = %+v", query)
 				}
 			},

@@ -7624,7 +7624,6 @@ export interface components {
             highlights?: components["schemas"]["SessionSearchHighlight"][];
             /** @enum {string} */
             kind: "title" | "user" | "assistant" | "tool" | "command" | "path";
-            machine?: string;
             messageId?: string;
             projectId: string;
             projectName?: string;
@@ -16714,8 +16713,6 @@ export interface operations {
                 projectId?: string;
                 /** @description Restrict results to one agent harness, such as claude-code or codex. */
                 harness?: string;
-                /** @description Restrict results to one host. */
-                machine?: string;
                 /** @description Restrict to sessions that touched a path containing this text. */
                 path?: string;
                 /** @description Restrict to one session lifecycle state. */
