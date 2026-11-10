@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -81,7 +82,8 @@ type ChangeKind string
 const (
 	// ChangeRestored brings back a file deleted since the snapshot.
 	ChangeRestored ChangeKind = "restored"
-	// ChangeReverted puts back the contents of a file changed since the snapshot.
+	// ChangeReverted puts back the contents or the staged state of a file
+	// changed since the snapshot.
 	ChangeReverted ChangeKind = "reverted"
 	// ChangeRemoved deletes a file created since the snapshot.
 	ChangeRemoved ChangeKind = "removed"
@@ -106,7 +108,10 @@ type Restore struct {
 	head    string
 	current state
 	target  state
-	Changes []Change
+	// indexOnly holds the listed paths whose files already match the snapshot,
+	// so only their index entries change.
+	indexOnly map[string]bool
+	Changes   []Change
 	// CommitsSince counts commits on HEAD made after the snapshot. Restoring
 	// changes files and never history, so they stay on the branch.
 	CommitsSince int
@@ -130,7 +135,7 @@ func Capture(ctx context.Context, workspace string, refs ...string) error {
 	if err := checkUntracked(ctx, top); err != nil {
 		return err
 	}
-	current, err := capture(ctx, top)
+	current, err := capture(ctx, top, nil)
 	if err != nil {
 		return err
 	}
@@ -200,9 +205,23 @@ func Plan(ctx context.Context, workspace, ref string) (Restore, error) {
 	if nested != "" {
 		return Restore{}, fmt.Errorf("%w: %s", ErrNestedRepository, nested)
 	}
-	current, err := capture(ctx, top)
+	current, err := capture(ctx, top, nil)
 	if err != nil {
 		return Restore{}, err
+	}
+	changes, err := diff(ctx, top, current.worktree, target.worktree)
+	if err != nil {
+		return Restore{}, err
+	}
+	if ignored := overwritten(top, changes); len(ignored) > 0 {
+		// The capture skipped these as ignored, but Apply would write over them,
+		// so record them too: Save then keeps them and PlanID covers them.
+		if current, err = capture(ctx, top, ignored); err != nil {
+			return Restore{}, err
+		}
+		if changes, err = diff(ctx, top, current.worktree, target.worktree); err != nil {
+			return Restore{}, err
+		}
 	}
 	for _, tree := range []string{current.worktree, target.worktree} {
 		nested, err := gitlink(ctx, top, tree)
@@ -213,24 +232,52 @@ func Plan(ctx context.Context, workspace, ref string) (Restore, error) {
 			return Restore{}, fmt.Errorf("%w: %s", ErrNestedRepository, nested)
 		}
 	}
-	changes, err := diff(ctx, top, current.worktree, target.worktree)
+	staged, err := diff(ctx, top, current.index, target.index)
 	if err != nil {
 		return Restore{}, err
 	}
+	changes, indexOnly := withIndexOnly(changes, staged)
 	id := sha256.Sum256([]byte(strings.Join([]string{snapshot, head, current.worktree, current.index}, "\n")))
 	return Restore{
-		top: top, head: head, current: current, target: target,
+		top: top, head: head, current: current, target: target, indexOnly: indexOnly,
 		Changes: changes, CommitsSince: commitsSince, PlanID: hex.EncodeToString(id[:16]),
 	}, nil
+}
+
+// withIndexOnly adds to the worktree's changes every path only the index
+// changes, such as a file the turn staged without editing it, and names those
+// paths.
+func withIndexOnly(changes, staged []Change) ([]Change, map[string]bool) {
+	listed := make(map[string]bool, len(changes))
+	for _, change := range changes {
+		listed[change.Path] = true
+	}
+	var indexOnly map[string]bool
+	for _, change := range staged {
+		if listed[change.Path] {
+			continue
+		}
+		if indexOnly == nil {
+			indexOnly = map[string]bool{}
+		}
+		indexOnly[change.Path] = true
+		changes = append(changes, Change{Path: change.Path, Kind: ChangeReverted})
+	}
+	if indexOnly != nil {
+		slices.SortFunc(changes, func(a, b Change) int { return strings.Compare(a.Path, b.Path) })
+	}
+	return changes, indexOnly
 }
 
 // Apply writes the snapshot's files and index entries for every planned change.
 func (r Restore) Apply(ctx context.Context) error {
 	var write, remove []string
 	for _, change := range r.Changes {
-		if change.Kind == ChangeRemoved {
+		switch {
+		case r.indexOnly[change.Path]:
+		case change.Kind == ChangeRemoved:
 			remove = append(remove, change.Path)
-		} else {
+		default:
 			write = append(write, change.Path)
 		}
 	}
@@ -241,9 +288,11 @@ func (r Restore) Apply(ctx context.Context) error {
 func (r Restore) Undo(ctx context.Context) error {
 	var write, remove []string
 	for _, change := range r.Changes {
-		if change.Kind == ChangeRestored {
+		switch {
+		case r.indexOnly[change.Path]:
+		case change.Kind == ChangeRestored:
 			remove = append(remove, change.Path)
-		} else {
+		default:
 			write = append(write, change.Path)
 		}
 	}
@@ -311,8 +360,9 @@ func isAny(path string, infos []os.FileInfo) bool {
 	return false
 }
 
-// write makes the worktree and index match to for the given paths: removals
-// first, so a file can replace a directory it used to be and the reverse.
+// write makes the worktree match to for the given paths, removals first so a
+// file can replace a directory it used to be and the reverse, and then the index
+// match it for every planned change.
 func (r Restore) write(ctx context.Context, to state, write, remove []string) error {
 	for _, path := range remove {
 		if err := removeFile(r.top, path); err != nil {
@@ -333,9 +383,12 @@ func (r Restore) write(ctx context.Context, to state, write, remove []string) er
 			return err
 		}
 	}
-	paths := append(append([]string(nil), write...), remove...)
-	if len(paths) == 0 {
+	if len(r.Changes) == 0 {
 		return nil
+	}
+	paths := make([]string, len(r.Changes))
+	for i, change := range r.Changes {
+		paths[i] = change.Path
 	}
 	_, err := git(ctx, r.top, nil, nulList(paths),
 		"--literal-pathspecs", "reset", "--quiet", to.index, "--pathspec-from-file=-", "--pathspec-file-nul")
@@ -343,8 +396,9 @@ func (r Restore) write(ctx context.Context, to state, write, remove []string) er
 }
 
 // capture records the worktree and the index as trees through a copy of the
-// real index, so files whose stat data git already holds are not re-read.
-func capture(ctx context.Context, top string) (state, error) {
+// real index, so files whose stat data git already holds are not re-read. The
+// worktree tree leaves out ignored files other than those under ignored.
+func capture(ctx context.Context, top string, ignored []string) (state, error) {
 	realIndex, err := git(ctx, top, nil, nil, "rev-parse", "--path-format=absolute", "--git-path", "index")
 	if err != nil {
 		return state{}, err
@@ -365,6 +419,12 @@ func capture(ctx context.Context, top string) (state, error) {
 	}
 	if _, err := git(ctx, top, env, nil, "add", "--all"); err != nil {
 		return state{}, err
+	}
+	if len(ignored) > 0 {
+		if _, err := git(ctx, top, env, nulList(ignored),
+			"--literal-pathspecs", "add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+			return state{}, err
+		}
 	}
 	if out.worktree, err = git(ctx, top, env, nil, "write-tree"); err != nil {
 		return state{}, err
@@ -400,6 +460,33 @@ func copyIndex(from, to string) error {
 		return fmt.Errorf("copy index: %w", err)
 	}
 	return nil
+}
+
+// overwritten names what is on disk where Apply would write a path the worktree
+// tree lacks: an ignored file or directory at that path, or an ignored file or
+// symlink where one of its parent directories goes. Writing the path replaces
+// them.
+func overwritten(top string, changes []Change) []string {
+	seen := map[string]bool{}
+	var paths []string
+	for _, change := range changes {
+		if change.Kind != ChangeRestored {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(top, filepath.FromSlash(change.Path))); err == nil && !seen[change.Path] {
+			seen[change.Path] = true
+			paths = append(paths, change.Path)
+		}
+		for dir := change.Path; strings.Contains(dir, "/"); {
+			dir = dir[:strings.LastIndexByte(dir, '/')]
+			info, err := os.Lstat(filepath.Join(top, filepath.FromSlash(dir)))
+			if err == nil && !info.IsDir() && !seen[dir] {
+				seen[dir] = true
+				paths = append(paths, dir)
+			}
+		}
+	}
+	return paths
 }
 
 // ignoredRepository names a repository at an ignored path in the worktree,

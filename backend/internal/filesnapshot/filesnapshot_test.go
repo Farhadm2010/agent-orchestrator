@@ -68,6 +68,119 @@ func TestRestoreReturnsWorktreeAndIndexToTheSnapshot(t *testing.T) {
 	}
 }
 
+func TestRestoreUndoesWhatTheTurnOnlyStaged(t *testing.T) {
+	repo := newRepo(t)
+	// Before the turn: an unstaged edit, an untracked file and an unstaged deletion.
+	write(t, repo, "a.txt", "edited\n")
+	write(t, repo, "notes.txt", "untracked\n")
+	remove(t, repo, "b.txt")
+	before := status(t, repo)
+	ref := Ref("s1", "turn-1")
+	if err := Capture(context.Background(), repo, ref); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+
+	// The turn stages all three without changing a byte on disk.
+	runGit(t, repo, "add", "--all")
+	after := status(t, repo)
+
+	plan, err := Plan(context.Background(), repo, ref)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	want := []Change{
+		{Path: "a.txt", Kind: ChangeReverted},
+		{Path: "b.txt", Kind: ChangeReverted},
+		{Path: "notes.txt", Kind: ChangeReverted},
+	}
+	if !reflect.DeepEqual(plan.Changes, want) {
+		t.Fatalf("plan = %+v, want %+v", plan.Changes, want)
+	}
+	if err := plan.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := status(t, repo); got != before {
+		t.Fatalf("status after restore = %q, want the pre-turn %q", got, before)
+	}
+	if got := read(t, repo, "a.txt"); got != "edited\n" {
+		t.Fatalf("a.txt = %q, want it left as it was", got)
+	}
+	if err := plan.Undo(context.Background()); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if got := status(t, repo); got != after {
+		t.Fatalf("status after undo = %q, want %q", got, after)
+	}
+}
+
+func TestRestoreKeepsIgnoredFilesItOverwrites(t *testing.T) {
+	repo := newRepo(t)
+	write(t, repo, "note.txt", "before the turn\n")
+	write(t, repo, "out/report.txt", "report\n")
+	ref := Ref("s1", "turn-1")
+	if err := Capture(context.Background(), repo, ref); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+
+	// The turn ignores both paths, edits note.txt and puts a file where out/ was.
+	write(t, repo, ".gitignore", "build/\nnote.txt\n/out\n")
+	write(t, repo, "note.txt", "edited by the turn\n")
+	remove(t, repo, "out/report.txt")
+	remove(t, repo, "out")
+	write(t, repo, "out", "file where a directory was\n")
+
+	plan, err := Plan(context.Background(), repo, ref)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	want := []Change{
+		{Path: ".gitignore", Kind: ChangeReverted},
+		{Path: "note.txt", Kind: ChangeReverted},
+		{Path: "out", Kind: ChangeRemoved},
+		{Path: "out/report.txt", Kind: ChangeRestored},
+	}
+	if !reflect.DeepEqual(plan.Changes, want) {
+		t.Fatalf("plan = %+v, want %+v", plan.Changes, want)
+	}
+
+	write(t, repo, "note.txt", "edited after the preview\n")
+	plan2, err := Plan(context.Background(), repo, ref)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan2.PlanID == plan.PlanID {
+		t.Fatal("PlanID did not change after an ignored file the restore overwrites was edited")
+	}
+
+	saved := BeforeRollbackRef("s1", "turn-1")
+	if err := plan2.Save(context.Background(), saved); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := plan2.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := read(t, repo, "note.txt"); got != "before the turn\n" {
+		t.Fatalf("note.txt = %q, want the pre-turn contents", got)
+	}
+	if got := read(t, repo, "out/report.txt"); got != "report\n" {
+		t.Fatalf("out/report.txt = %q, want it back", got)
+	}
+	for path, content := range map[string]string{"note.txt": "edited after the preview", "out": "file where a directory was"} {
+		if got := gitOutput(t, repo, "show", saved+":"+path); got != content {
+			t.Fatalf("saved %s = %q, want %q", path, got, content)
+		}
+	}
+	if err := plan2.Undo(context.Background()); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if got := read(t, repo, "note.txt"); got != "edited after the preview\n" {
+		t.Fatalf("note.txt after undo = %q, want the latest contents", got)
+	}
+	if got := read(t, repo, "out"); got != "file where a directory was\n" {
+		t.Fatalf("out after undo = %q, want the file back", got)
+	}
+}
+
 func TestUndoPutsBackWhatApplyReplaced(t *testing.T) {
 	repo := newRepo(t)
 	ref := Ref("s1", "turn-1")
