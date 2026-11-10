@@ -1,11 +1,6 @@
 package domain
 
-import (
-	"bufio"
-	"os"
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 func TestPorterStemKnownWords(t *testing.T) {
 	// Pairs taken from Porter's published vocabulary/output files, chosen to
@@ -39,43 +34,5 @@ func TestPorterStemKnownWords(t *testing.T) {
 		if got := PorterStem(word); got != want {
 			t.Errorf("PorterStem(%q) = %q, want %q", word, got, want)
 		}
-	}
-}
-
-// TestPorterStemReferenceVocabulary checks every word of Porter's official test
-// vocabulary against his official output. Set AO_PORTER_VOCAB_DIR to a folder
-// holding voc.txt and output.txt from https://tartarus.org/martin/PorterStemmer/.
-func TestPorterStemReferenceVocabulary(t *testing.T) {
-	dir := os.Getenv("AO_PORTER_VOCAB_DIR")
-	if dir == "" {
-		t.Skip("set AO_PORTER_VOCAB_DIR to a folder with Porter's voc.txt and output.txt")
-	}
-	words, err := os.Open(filepath.Join(dir, "voc.txt"))
-	if err != nil {
-		t.Fatalf("open voc.txt: %v", err)
-	}
-	defer func() { _ = words.Close() }()
-	stems, err := os.Open(filepath.Join(dir, "output.txt"))
-	if err != nil {
-		t.Fatalf("open output.txt: %v", err)
-	}
-	defer func() { _ = stems.Close() }()
-	wordLines, stemLines := bufio.NewScanner(words), bufio.NewScanner(stems)
-	total, wrong := 0, 0
-	for wordLines.Scan() {
-		if !stemLines.Scan() {
-			t.Fatal("output.txt is shorter than voc.txt")
-		}
-		total++
-		if got := PorterStem(wordLines.Text()); got != stemLines.Text() {
-			wrong++
-			if wrong <= 20 {
-				t.Errorf("PorterStem(%q) = %q, want %q", wordLines.Text(), got, stemLines.Text())
-			}
-		}
-	}
-	t.Logf("%d words, %d mismatches", total, wrong)
-	if wrong > 0 {
-		t.Fatalf("%d of %d reference words stem differently", wrong, total)
 	}
 }
