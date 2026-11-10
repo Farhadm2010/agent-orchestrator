@@ -451,9 +451,8 @@ const DefaultSessionSearchTailWeight = 0.25
 // first, its tail adds up. With every match counted, length still decided too
 // often on a real archive: an orchestrator session that relays every worker's
 // messages, or a 600-message review, gathered hundreds of weak matches on
-// common words and outranked the session named exactly what was typed
-// (docs/session-search §8.7). A handful keeps the multi-evidence benefit the
-// tail exists for.
+// common words and outranked the session named exactly what was typed. A
+// handful keeps the multi-evidence benefit the tail exists for.
 const DefaultSessionSearchTailDepth = 5
 
 // TailWeight returns the session tail weight in effect.
@@ -474,9 +473,9 @@ func (r SessionSearchRanking) TailWeight() float64 {
 // "Simple BM25 extension to multiple weighted fields", CIKM 2004): a kind is
 // worth more or less evidence, but a strong match in a weaker kind can still
 // beat a weak match in a stronger one. A hard kind tier cannot do that, and on
-// LoCoMo it cost 22 points of turn-level recall@10 (docs/session-search §7.3).
-// The title column also carries its own bm25 column weight, so a title needs no
-// extra kind boost to lead.
+// LoCoMo it cost 22 points of turn-level recall@10. The title column also
+// carries its own bm25 column weight, so a title needs no extra kind boost to
+// lead.
 var DefaultSessionSearchKindWeights = map[SessionSearchKind]float64{
 	SessionSearchKindTitle:     1.0,
 	SessionSearchKindUser:      1.25,

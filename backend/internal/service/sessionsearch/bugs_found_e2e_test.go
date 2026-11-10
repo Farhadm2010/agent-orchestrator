@@ -12,9 +12,9 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
-// The tests in this file each pin a bug the real-data end-to-end run found
-// (docs/session-search/ANALYSIS.md §8.7). They run against the real store: the
-// controller tests stub the service, which is how all of these got through.
+// The tests in this file each pin a bug the real-data end-to-end run found.
+// They run against the real store: the controller tests stub the service,
+// which is how all of these got through.
 
 // seedChatSessionAt is seedChatSession with the session's own start time.
 func seedChatSessionAt(t *testing.T, store *sqlite.Store, projectID, sessionID, conversationID string, createdAt time.Time) domain.SessionRecord {
