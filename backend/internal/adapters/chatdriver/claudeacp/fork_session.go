@@ -72,24 +72,31 @@ func (d *checkpointDriver) ForkIntoWorkspace(ctx context.Context, sourceID, sour
 	return childID, nil
 }
 
-// DeleteWorkspaceFork removes a session made by ForkIntoWorkspace.
-func (d *checkpointDriver) DeleteWorkspaceFork(ctx context.Context, providerConversationID, workspace string, env map[string]string) error {
+// DeleteWorkspaceFork removes a session made by ForkIntoWorkspace. The copy
+// is found by its session id, which is the fork's own, in whichever project
+// folder holds it: the folder can't be derived again from a workspace that is
+// already gone or was reached through a symlink.
+func (d *checkpointDriver) DeleteWorkspaceFork(ctx context.Context, providerConversationID, _ string, env map[string]string) error {
 	resolver, ok := d.plugin.(nativeConfigDirResolver)
-	if !ok || providerConversationID == "" || strings.ContainsAny(providerConversationID, `/\`) {
+	// A path separator or a pattern character would reach other files.
+	if !ok || providerConversationID == "" || strings.ContainsAny(providerConversationID, `/\*?[`) {
 		return nil
 	}
 	configDir, err := resolver.NativeSessionConfigDir(ctx, env)
 	if err != nil {
 		return err
 	}
-	if real, err := filepath.EvalSymlinks(workspace); err == nil {
-		workspace = real
+	copies, err := filepath.Glob(filepath.Join(configDir, "projects", "*", providerConversationID+".jsonl"))
+	if err != nil {
+		return err
 	}
-	err = os.Remove(filepath.Join(configDir, "projects", claudeProjectKey(workspace), providerConversationID+".jsonl"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	var errs []error
+	for _, path := range copies {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
 	}
-	return err
+	return errors.Join(errs...)
 }
 
 var nonAlphanumeric = regexp.MustCompile(`[^A-Za-z0-9]`)
