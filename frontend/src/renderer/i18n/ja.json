@@ -4357,13 +4357,17 @@
 	"sessionFork.fork": "フォーク",
 	"sessionFork.tooltip": "このセッションを新しいセッションにフォーク",
 	"sessionFork.forking": "フォーク中…",
-	"sessionFork.forkedFrom": "{{title}} からフォーク",
 	"sessionFork.unavailable": "フォークのオプションを取得できません",
 	"sessionFork.failed": "このセッションをフォークできませんでした",
 	"sessionFork.sectionTitle": "フォーク",
 	"sessionFork.originalPRs": "元のセッションの PR",
 	"sessionFork.originalPR": "元のセッションの PR #{{number}}",
 	"sessionFork.forkSession": "セッションをフォーク",
+	"sessionFork.forkedFromSentence": "このセッションは <session>{{title}}</session> からフォークされました。",
+	"sessionFork.originalDeleted": "元のセッションはその後削除されました。",
+	"sessionFork.forkedInto_one": "このセッションから {{count}} 件のセッションがフォークされました:",
+	"sessionFork.forkedInto_other": "このセッションから {{count}} 件のセッションがフォークされました:",
+	"sessionFork.forkDeleted": "{{title}}(削除済み)",
 	"sessionFork.textCopy": "会話をテキストとしてコピー済み",
 	"sessionFork.textCopyNotice": "{{title}} からフォークしました。このエージェントは自分の会話をコピーできないため、元のセッションの会話をテキストとして受け取りました。"
 }

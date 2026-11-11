@@ -41,7 +41,8 @@ describe("SessionForksSection", () => {
 			sourcePRs: [{ url: "https://github.com/a/b/pull/7", number: 7, merged: false, closed: false }],
 		} });
 		renderSection();
-		fireEvent.click(await screen.findByRole("button", { name: "Forked from Fix login" }));
+		expect(await screen.findByText(/This session was forked from/)).toHaveTextContent("This session was forked from Fix login.");
+		fireEvent.click(screen.getByRole("button", { name: "Fix login" }));
 		expect(JSON.stringify(navigateMock.mock.calls[0][0])).toContain("p-1");
 		expect(screen.getByRole("link", { name: "Original's PR #7" })).toHaveAttribute("href", "https://github.com/a/b/pull/7");
 	});
@@ -52,16 +53,31 @@ describe("SessionForksSection", () => {
 		expect(await screen.findByText("Conversation copied as text")).toBeInTheDocument();
 	});
 
-	it("lists the forks of an original", async () => {
+	it("says when the original has since been deleted, without a link", async () => {
+		getMock.mockResolvedValue({ data: { allowed: true, forkedFrom: { sessionId: "p-1", title: "Fix login", sourceExists: false } } });
+		renderSection();
+		expect(await screen.findByText(/This session was forked from/)).toHaveTextContent("This session was forked from Fix login.");
+		expect(screen.getByText("The original session has since been deleted.")).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Fix login" })).toBeNull();
+	});
+
+	it("says which sessions were forked from an original, with links", async () => {
 		getMock.mockResolvedValue({ data: { allowed: true, forks: [
 			{ sessionId: "p-10", title: "Fork of Fix login", exists: true },
 			{ sessionId: "p-11", title: "Fork 2 of Fix login", exists: false },
 		] } });
 		renderSection();
-		fireEvent.click(await screen.findByRole("button", { name: "Fork of Fix login" }));
+		expect(await screen.findByText("2 sessions were forked from this one:")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "Fork of Fix login" }));
 		expect(JSON.stringify(navigateMock.mock.calls[0][0])).toContain("p-10");
-		expect(screen.getByText("Fork 2 of Fix login")).toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Fork 2 of Fix login" })).toBeNull();
+		expect(screen.getByText("Fork 2 of Fix login (deleted)")).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: /Fork 2 of Fix login/ })).toBeNull();
+	});
+
+	it("names a single fork in the singular", async () => {
+		getMock.mockResolvedValue({ data: { allowed: true, forks: [{ sessionId: "p-10", title: "Fork of Fix login", exists: true }] } });
+		renderSection();
+		expect(await screen.findByText("1 session was forked from this one:")).toBeInTheDocument();
 	});
 
 	it("renders nothing for a session that is neither a fork nor forked", async () => {

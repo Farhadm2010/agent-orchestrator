@@ -4338,13 +4338,17 @@
 	"sessionFork.fork": "Fork",
 	"sessionFork.tooltip": "Fork this session into a new one",
 	"sessionFork.forking": "Forking…",
-	"sessionFork.forkedFrom": "Forked from {{title}}",
 	"sessionFork.unavailable": "Fork options are unavailable",
 	"sessionFork.failed": "Couldn't fork this session",
 	"sessionFork.sectionTitle": "Forks",
 	"sessionFork.originalPRs": "Original's PRs",
 	"sessionFork.originalPR": "Original's PR #{{number}}",
 	"sessionFork.forkSession": "Fork session",
+	"sessionFork.forkedFromSentence": "This session was forked from <session>{{title}}</session>.",
+	"sessionFork.originalDeleted": "The original session has since been deleted.",
+	"sessionFork.forkedInto_one": "{{count}} session was forked from this one:",
+	"sessionFork.forkedInto_other": "{{count}} sessions were forked from this one:",
+	"sessionFork.forkDeleted": "{{title}} (deleted)",
 	"sessionFork.textCopy": "Conversation copied as text",
 	"sessionFork.textCopyNotice": "Forked from {{title}}. This agent can't copy its own conversation, so it was given the original's conversation as text."
 }
