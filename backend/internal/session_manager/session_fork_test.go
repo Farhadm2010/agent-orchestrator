@@ -744,16 +744,17 @@ func TestForkFailsWhenItsArtifactsCannotBeCopied(t *testing.T) {
 	launcher := &recordingLauncher{}
 	m, st, _ := newChatManager(launcher)
 	m.dataDir = t.TempDir()
-	unreadable := filepath.Join(m.artifactDir("mer-0"), "report.md")
-	writeTestFile(t, unreadable, "report")
-	if err := os.Chmod(unreadable, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o600) })
+	// An older turn's saved version of report.md whose stored copy is gone,
+	// so copying it fails the same way on every system.
+	cutoff := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	writeTestFile(t, filepath.Join(m.artifactDir("mer-0"), "report.md"), "report now")
+	m.store = artifactVersionStore{fakeStore: st, versions: map[string][]domain.SessionArtifactVersion{
+		"report.md": {{Path: "report.md", Version: 1, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("missing blob"))), ModTime: cutoff.Add(-time.Minute)}},
+	}}
 	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
 		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
 		RequestedMode: domain.SessionModeChat,
-		Fork:          &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc"},
+		Fork:          &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc", ArtifactsAsOf: cutoff},
 	})
 	if !errors.Is(err, ErrSpawnArtifactDir) {
 		t.Fatalf("spawn = %v, want ErrSpawnArtifactDir", err)
