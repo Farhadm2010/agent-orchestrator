@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -158,14 +159,21 @@ type Deps struct {
 }
 
 // Service forks sessions.
-type Service struct{ deps Deps }
+type Service struct {
+	deps Deps
+	// numbers holds the fork numbers taken by forks still being made, per
+	// root: a fork is recorded only once its spawn returns, so two forks
+	// started together would otherwise read the same next number.
+	numbersMu sync.Mutex
+	numbers   map[domain.SessionID]map[int]bool
+}
 
 // New builds the service.
 func New(deps Deps) *Service {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
-	return &Service{deps: deps}
+	return &Service{deps: deps, numbers: map[domain.SessionID]map[int]bool{}}
 }
 
 // Enabled reports whether session forks are on.
@@ -308,6 +316,8 @@ func (s *Service) ForkTurn(ctx context.Context, sourceID domain.SessionID, clien
 	if err != nil {
 		return domain.SessionRecord{}, err
 	}
+	release := s.takeNumber(&plan)
+	defer release()
 	cfg := ports.SpawnConfig{
 		ProjectID:       plan.source.ProjectID,
 		ClientRequestID: clientRequestID,
@@ -467,6 +477,9 @@ func (s *Service) plan(ctx context.Context, sourceID domain.SessionID, turnID st
 	if plan.number, err = s.deps.Lineage.NextSessionForkNumber(ctx, plan.root); err != nil {
 		return forkPlan{}, err
 	}
+	s.numbersMu.Lock()
+	plan.number = nextFreeNumber(plan.number, s.numbers[plan.root])
+	s.numbersMu.Unlock()
 	plan.name = ForkDisplayName(plan.number, RootTitle(plan.title))
 	if !capture {
 		if _, err := s.deps.Seeds.Capture(ctx, rec.Metadata.WorkspacePath, ""); errors.Is(err, ErrNotRepository) {
@@ -538,4 +551,36 @@ func randomID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// takeNumber holds plan's fork number, moving it past any held by forks of the
+// same root still being made, until the fork is recorded or fails.
+func (s *Service) takeNumber(plan *forkPlan) (release func()) {
+	s.numbersMu.Lock()
+	defer s.numbersMu.Unlock()
+	held := s.numbers[plan.root]
+	if held == nil {
+		held = map[int]bool{}
+		s.numbers[plan.root] = held
+	}
+	plan.number = nextFreeNumber(plan.number, held)
+	plan.name = ForkDisplayName(plan.number, RootTitle(plan.title))
+	held[plan.number] = true
+	root, number := plan.root, plan.number
+	return func() {
+		s.numbersMu.Lock()
+		defer s.numbersMu.Unlock()
+		delete(s.numbers[root], number)
+		if len(s.numbers[root]) == 0 {
+			delete(s.numbers, root)
+		}
+	}
+}
+
+// nextFreeNumber is the first number from n that no fork in progress holds.
+func nextFreeNumber(n int, held map[int]bool) int {
+	for held[n] {
+		n++
+	}
+	return n
 }
