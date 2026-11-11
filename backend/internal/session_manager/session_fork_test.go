@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/forkseed"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/scratch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/attachmentstore"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -79,6 +80,9 @@ func (*failingForkSeeds) UnchangedSince(context.Context, string, string) (bool, 
 	return false, nil
 }
 func (*failingForkSeeds) DiscardChanges(context.Context, string) error { return nil }
+func (*failingForkSeeds) RestoreBase(context.Context, string, string) (bool, error) {
+	return false, nil
+}
 func (f *failingForkSeeds) Delete(_ context.Context, _ string, ref string) error {
 	f.deleted = append(f.deleted, ref)
 	return nil
@@ -396,7 +400,12 @@ func TestForkCopiesAttachmentsAndPointsLinksAtItself(t *testing.T) {
 	}
 }
 
-type recordingForkSeeds struct{ applied, deleted []string }
+type recordingForkSeeds struct{ applied, deleted, restoredBase []string }
+
+func (r *recordingForkSeeds) RestoreBase(_ context.Context, worktree, ref string) (bool, error) {
+	r.restoredBase = append(r.restoredBase, worktree+"|"+ref)
+	return true, nil
+}
 
 func (r *recordingForkSeeds) Apply(_ context.Context, _ string, ref string) error {
 	r.applied = append(r.applied, ref)
@@ -631,5 +640,47 @@ func TestChatTextHandoffForkStartsWithTheNote(t *testing.T) {
 	}
 	if rec.Metadata.Prompt != "" {
 		t.Fatalf("task = %q, the note must not be saved as the task", rec.Metadata.Prompt)
+	}
+}
+
+// Restore recreates an archived fork's worktree at its start commit; its
+// starting files are written back, so archiving an untouched fork loses
+// nothing. An ordinary session's recreated worktree is left as it is.
+func TestRestoreRecreatedForkGetsItsStartingFilesBack(t *testing.T) {
+	m, st, _, _ := newManager()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(root, "workspaces")
+	adapter, err := scratch.New(scratch.Options{ManagedRoot: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.workspace = adapter
+	seeds := &recordingForkSeeds{}
+	m.forkSeeds = seeds
+	project := domain.ProjectRecord{ID: "scratch", Kind: domain.ProjectKindScratch, Path: t.TempDir()}
+	fork := domain.SessionRecord{ID: "scratch-1", ProjectID: "scratch", Kind: domain.KindWorker,
+		Metadata: domain.SessionMetadata{WorkspacePath: filepath.Join(managed, "scratch", "workers", "scratch-1")}}
+	plain := domain.SessionRecord{ID: "scratch-2", ProjectID: "scratch", Kind: domain.KindWorker,
+		Metadata: domain.SessionMetadata{WorkspacePath: filepath.Join(managed, "scratch", "workers", "scratch-2")}}
+	m.store = lineageStore{fakeStore: st, forks: map[domain.SessionID]domain.SessionFork{fork.ID: {ForkSessionID: fork.ID, SourceSessionID: "scratch-0"}}}
+
+	for _, rec := range []domain.SessionRecord{fork, plain} {
+		if _, err := m.restoreSessionWorkspace(context.Background(), project, rec); err != nil {
+			t.Fatalf("restore %s: %v", rec.ID, err)
+		}
+	}
+	want := fork.Metadata.WorkspacePath + "|" + forkseed.BaseRef(string(fork.ID))
+	if len(seeds.restoredBase) != 1 || seeds.restoredBase[0] != want {
+		t.Fatalf("starting files restored for %v, want only %q", seeds.restoredBase, want)
+	}
+	// A worktree that wasn't recreated keeps whatever it has.
+	if _, err := m.restoreSessionWorkspace(context.Background(), project, fork); err != nil {
+		t.Fatal(err)
+	}
+	if len(seeds.restoredBase) != 1 {
+		t.Fatalf("starting files written again into an existing worktree: %v", seeds.restoredBase)
 	}
 }

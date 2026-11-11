@@ -246,3 +246,57 @@ func TestDiscardInheritedLeavesTheWorktreeClean(t *testing.T) {
 		t.Fatal("ignored files such as dependencies are left alone")
 	}
 }
+
+// A fork's worktree recreated on restore gets its starting files back,
+// uncommitted, as long as its branch hasn't moved since the fork.
+func TestRestoreBasePutsTheForksStartingFilesBack(t *testing.T) {
+	src := sourceRepo(t)
+	ctx := context.Background()
+	ref := BaseRef("fork-1")
+	if err := RecordBase(ctx, src, ref); err != nil {
+		t.Fatal(err)
+	}
+	// A recreated worktree: clean, at the commit the fork started on.
+	restored := filepath.Join(t.TempDir(), "restored")
+	git(t, src, "worktree", "add", "-q", "--detach", restored, "HEAD")
+
+	applied, err := RestoreBase(ctx, restored, ref)
+	if err != nil || !applied {
+		t.Fatalf("applied=%v err=%v", applied, err)
+	}
+	if got := read(t, filepath.Join(restored, "a.txt")); got != "a3 uncommitted\n" {
+		t.Fatalf("a.txt = %q", got)
+	}
+	if got := read(t, filepath.Join(restored, "new", "untracked.txt")); got != "new\n" {
+		t.Fatalf("untracked file = %q", got)
+	}
+	if git(t, restored, "rev-parse", "HEAD") != git(t, src, "rev-parse", "HEAD") {
+		t.Fatal("restoring the files must not move HEAD")
+	}
+}
+
+// A fork that committed since it started keeps its own history: its starting
+// files would undo those commits, so they aren't written back.
+func TestRestoreBaseLeavesAForkThatMovedOn(t *testing.T) {
+	src := sourceRepo(t)
+	ctx := context.Background()
+	ref := BaseRef("fork-1")
+	if err := RecordBase(ctx, src, ref); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "commit", "-qm", "the fork's own work")
+	write(t, filepath.Join(src, "a.txt"), "after the fork\n")
+	git(t, src, "commit", "-qam", "more")
+
+	applied, err := RestoreBase(ctx, src, ref)
+	if err != nil || applied {
+		t.Fatalf("applied=%v err=%v; a fork that moved on must be left alone", applied, err)
+	}
+	if got := read(t, filepath.Join(src, "a.txt")); got != "after the fork\n" {
+		t.Fatalf("a.txt = %q", got)
+	}
+	if applied, err := RestoreBase(ctx, src, BaseRef("missing")); err != nil || applied {
+		t.Fatalf("no base recorded: applied=%v err=%v", applied, err)
+	}
+}

@@ -26,6 +26,9 @@ type forkSeedApplier interface {
 	RecordBase(ctx context.Context, worktree, ref string) error
 	UnchangedSince(ctx context.Context, worktree, ref string) (bool, error)
 	DiscardChanges(ctx context.Context, worktree string) error
+	// RestoreBase writes a fork's starting files back into a recreated
+	// worktree that is still at the fork's start commit.
+	RestoreBase(ctx context.Context, worktree, ref string) (bool, error)
 }
 
 type gitForkSeeds struct{}
@@ -44,6 +47,10 @@ func (gitForkSeeds) RecordBase(ctx context.Context, worktree, ref string) error 
 
 func (gitForkSeeds) UnchangedSince(ctx context.Context, worktree, ref string) (bool, error) {
 	return forkseed.UnchangedSince(ctx, worktree, ref)
+}
+
+func (gitForkSeeds) RestoreBase(ctx context.Context, worktree, ref string) (bool, error) {
+	return forkseed.RestoreBase(ctx, worktree, ref)
 }
 
 func (gitForkSeeds) DiscardChanges(ctx context.Context, worktree string) error {
@@ -419,4 +426,17 @@ func (m *Manager) dropInheritedForkChanges(ctx context.Context, rec domain.Sessi
 		return false
 	}
 	return true
+}
+
+// restoreForkStartingFiles puts a fork's starting files back into its worktree
+// after restore recreated it. Archiving drops a fork's inherited changes when
+// it never touched them, so the worktree can be removed; they live on under
+// the fork's starting-files ref until it is deleted.
+func (m *Manager) restoreForkStartingFiles(ctx context.Context, id domain.SessionID, worktree string) {
+	if worktree == "" || !m.isSessionFork(ctx, id) {
+		return
+	}
+	if _, err := m.forkSeeds.RestoreBase(ctx, worktree, forkseed.BaseRef(string(id))); err != nil {
+		m.logger.Warn("session fork: put starting files back after restore", "session", id, "err", err)
+	}
 }

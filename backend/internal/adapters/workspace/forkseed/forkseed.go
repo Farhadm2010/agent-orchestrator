@@ -113,6 +113,32 @@ func UnchangedSince(ctx context.Context, worktree, ref string) (bool, error) {
 	return now == base, nil
 }
 
+// RestoreBase writes a fork's starting files, recorded under ref, back into
+// its worktree, uncommitted, when the worktree was recreated and lost them.
+// It does so only while the worktree is still at the commit the fork started
+// on: a fork that committed since has its own history, which the starting
+// files would undo. applied is false when nothing was written.
+func RestoreBase(ctx context.Context, worktree, ref string) (applied bool, err error) {
+	if !strings.HasPrefix(ref, BasePrefix) {
+		return false, fmt.Errorf("forkseed: ref %q is outside %s", ref, BasePrefix)
+	}
+	start, err := run(ctx, worktree, nil, "rev-parse", "--verify", "--quiet", ref+"^1")
+	if err != nil {
+		return false, nil
+	}
+	head, err := run(ctx, worktree, nil, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return false, fmt.Errorf("forkseed: read HEAD: %w", err)
+	}
+	if head != start {
+		return false, nil
+	}
+	if err := Apply(ctx, worktree, ref); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // DiscardChanges drops the worktree's uncommitted changes and untracked
 // files, keeping ignored ones such as dependencies.
 func DiscardChanges(ctx context.Context, worktree string) error {
