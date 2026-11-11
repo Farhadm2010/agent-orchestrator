@@ -4474,6 +4474,7 @@
 	"sessionFork.forkedFromSentence": "Cette session a été dérivée de <session>{{title}}</session>.",
 	"sessionFork.originalDeleted": "La session d'origine a depuis été supprimée.",
 	"sessionFork.forkedInto_one": "{{count}} session a été dérivée de celle-ci :",
+	"sessionFork.forkedInto_many": "{{count}} sessions ont été dérivées de celle-ci :",
 	"sessionFork.forkedInto_other": "{{count}} sessions ont été dérivées de celle-ci :",
 	"sessionFork.forkDeleted": "{{title}} (supprimée)",
 	"sessionFork.textCopy": "Conversation copiée en texte",

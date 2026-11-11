@@ -4474,6 +4474,7 @@
 	"sessionFork.forkedFromSentence": "Esta sesión se bifurcó de <session>{{title}}</session>.",
 	"sessionFork.originalDeleted": "La sesión original se ha eliminado desde entonces.",
 	"sessionFork.forkedInto_one": "{{count}} sesión se bifurcó de esta:",
+	"sessionFork.forkedInto_many": "{{count}} sesiones se bifurcaron de esta:",
 	"sessionFork.forkedInto_other": "{{count}} sesiones se bifurcaron de esta:",
 	"sessionFork.forkDeleted": "{{title}} (eliminada)",
 	"sessionFork.textCopy": "Conversación copiada como texto",
