@@ -2,8 +2,10 @@ package chat_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/sessionfork"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
@@ -147,5 +150,33 @@ func TestForkOfATextForkKeepsTheEarlierConversation(t *testing.T) {
 	}
 	if !strings.Contains(note, "INHERITED: the code word is heron") {
 		t.Fatalf("note lost the inherited conversation:\n%s", note)
+	}
+}
+
+type failingBranchStore struct {
+	*sqlite.Store
+	fail *atomic.Bool
+}
+
+func (f failingBranchStore) ConversationBranch(ctx context.Context, conversationID, branchID string) (domain.ConversationBranch, error) {
+	if f.fail.Load() {
+		return domain.ConversationBranch{}, errors.New("database is locked")
+	}
+	return f.Store.ConversationBranch(ctx, conversationID, branchID)
+}
+
+// A fork whose source's earlier conversation can't be read must fail, not
+// start without it.
+func TestForkNoteFailsWhenTheEarlierConversationCannotBeRead(t *testing.T) {
+	var fail atomic.Bool
+	h := newHarnessWithConversationAndStore(t, nil, func(st *sqlite.Store) chatsvc.Store { return failingBranchStore{st, &fail} })
+	ctx := context.Background()
+	fail.Store(true)
+	rec, _, err := h.st.GetSession(ctx, testSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.ForkHandoffNote(ctx, rec, ports.ForkTarget{SessionID: "fork-3"}, "", time.Time{}); err == nil {
+		t.Fatal("want an error when the source's branch can't be read")
 	}
 }
