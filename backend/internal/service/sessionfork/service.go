@@ -524,7 +524,31 @@ func (s *Service) plan(ctx context.Context, sourceID domain.SessionID, turnID st
 	if err != nil {
 		return forkPlan{}, fmt.Errorf("capture source files: %w", err)
 	}
+	if agent.Freeze != nil {
+		// What Freeze kept must match the files: a source that acted since
+		// could have changed them in a way its copied conversation misses.
+		if err := s.requireUnchanged(ctx, rec); err != nil {
+			plan.dropSeed(ctx, s.deps.Seeds)
+			return forkPlan{}, err
+		}
+	}
 	return plan, nil
+}
+
+// requireUnchanged refuses the fork if the source has become busy or done
+// anything since rec was read.
+func (s *Service) requireUnchanged(ctx context.Context, rec domain.SessionRecord) error {
+	now, found, err := s.deps.Sessions.GetSession(ctx, rec.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrSessionNotFound
+	}
+	if now.Activity.State == domain.ActivityActive || !now.Activity.LastActivityAt.Equal(rec.Activity.LastActivityAt) {
+		return refuse(CodeSourceBusy)
+	}
+	return nil
 }
 
 // Title is the name a session shows in the sidebar.

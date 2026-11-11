@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -156,5 +157,42 @@ func TestForkFreezesTheSourceOnlyWhenForking(t *testing.T) {
 	}
 	if froze != 1 {
 		t.Fatalf("fork froze the source %d times, want once", froze)
+	}
+}
+
+// activeDuringCapture is a seed store whose capture runs while the source
+// takes a new command.
+type activeDuringCapture struct {
+	fakeSeeds
+	sessions fakeSessions
+}
+
+func (a activeDuringCapture) Capture(ctx context.Context, workspace, ref string) (string, error) {
+	rec := a.sessions["p-1"]
+	rec.Activity.LastActivityAt = rec.Activity.LastActivityAt.Add(time.Second)
+	a.sessions["p-1"] = rec
+	return a.fakeSeeds.Capture(ctx, workspace, ref)
+}
+
+// A source that acts between its freeze and the file capture could give the
+// fork files its copied conversation doesn't explain, so the fork is refused.
+func TestForkRefusesASourceThatActsWhileItsFilesAreCaptured(t *testing.T) {
+	froze := 0
+	var deleted []string
+	sessions := fakeSessions{"p-1": source()}
+	s, sp, _ := newService(source(), func(s *Service) {
+		s.deps.Sources = freezingSources{froze: &froze}
+		s.deps.Sessions = sessions
+		s.deps.Seeds = activeDuringCapture{fakeSeeds: fakeSeeds{deleted: &deleted}, sessions: sessions}
+	})
+	_, err := s.Fork(context.Background(), "p-1", "req-1")
+	if code := refusalCode(t, err); code != CodeSourceBusy {
+		t.Fatalf("refusal = %q, want %q", code, CodeSourceBusy)
+	}
+	if len(sp.got) != 0 {
+		t.Fatalf("spawned %d forks, want none", len(sp.got))
+	}
+	if len(deleted) != 1 {
+		t.Fatalf("deleted snapshots = %v, want the captured one", deleted)
 	}
 }
