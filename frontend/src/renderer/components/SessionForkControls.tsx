@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { GitFork } from "@/components/app-icons";
 import { createContext, useCallback, useContext, useRef } from "react";
 import { useTranslation } from "react-i18next";
+import { useHostConnection } from "../hooks/useHostConnection";
 import { apiErrorException } from "../lib/api-error-exception";
 import { clientForSessionHost } from "../lib/host-clients";
 import { sessionNavigateTarget } from "../lib/navigate-to-session";
@@ -28,11 +29,14 @@ export const LatestForkTurnContext = createContext<string | undefined>(undefined
 /** Whether a session can be forked, where it came from, and its forks. */
 export function useSessionForkOptions(session: WorkspaceSession | undefined, enabled = true) {
 	const { t } = useTranslation();
+	// A remote host's connection is in the key too, so options that failed
+	// while it was offline are asked for again once it reconnects.
+	const host = useHostConnection(session?.hostId);
 	return useQuery({
 		enabled: enabled && Boolean(session),
 		// Status and setup state are in the key: a busy or still-setting-up
 		// session becomes forkable when it goes idle or its worktree is ready.
-		queryKey: ["session-fork-options", session?.hostId ?? "", session?.id ?? "", session?.status, session?.provisionState ?? ""],
+		queryKey: ["session-fork-options", session?.hostId ?? "", host.isRemote ? host.baseUrl ?? "offline" : "", session?.id ?? "", session?.status, session?.provisionState ?? ""],
 		queryFn: async () => {
 			// Resolved here, not while rendering: a remote host that has
 			// disconnected throws, which becomes this query's error.

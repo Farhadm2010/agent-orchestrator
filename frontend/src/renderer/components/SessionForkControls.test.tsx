@@ -8,14 +8,25 @@ import { ForkableTurnContext, ForkSessionContext, ForkTextCopyNotice, LatestFork
 import { useSessionMenuEntries } from "./SessionContextMenuItems";
 import { TooltipProvider } from "./ui/tooltip";
 
-const { getMock, postMock, navigateMock } = vi.hoisted(() => ({ getMock: vi.fn(), postMock: vi.fn(), navigateMock: vi.fn() }));
+const { getMock, postMock, navigateMock, remote } = vi.hoisted(() => ({
+	getMock: vi.fn(),
+	postMock: vi.fn(),
+	navigateMock: vi.fn(),
+	// The remote "flaky" host, which a test connects and disconnects.
+	remote: { online: false, listeners: new Set<() => void>(), host: { hostId: "flaky", label: "flaky", url: "https://flaky", base: "https://flaky/api" } },
+}));
 
 vi.mock("../lib/host-clients", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../lib/host-clients")>()),
 	clientForSessionHost: (hostId?: string) => {
 		// As the real helper does for a remote host that has disconnected.
-		if (hostId === "gone") throw new Error("host gone is not connected");
+		if (hostId === "gone" || (hostId === "flaky" && !remote.online)) throw new Error(`host ${hostId} is not connected`);
 		return { GET: getMock, POST: postMock };
+	},
+	connectedHost: (hostId: string) => (hostId === "flaky" && remote.online ? remote.host : undefined),
+	subscribeConnectedHosts: (listener: () => void) => {
+		remote.listeners.add(listener);
+		return () => remote.listeners.delete(listener);
 	},
 }));
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
@@ -245,5 +256,19 @@ describe("session fork controls", () => {
 		const button = await screen.findByRole("button", { name: "Fork" });
 		await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "true"));
 		expect(getMock).not.toHaveBeenCalled();
+	});
+
+	it("asks again when a disconnected remote host reconnects", async () => {
+		remote.online = false;
+		const onRemote = { ...session, hostId: "flaky" } as WorkspaceSession;
+		renderControls(latestTurnFork(onRemote));
+		const button = await screen.findByRole("button", { name: "Fork" });
+		await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "true"));
+		act(() => {
+			remote.online = true;
+			for (const listener of remote.listeners) listener();
+		});
+		await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "false"));
+		expect(getMock).toHaveBeenCalledTimes(1);
 	});
 });
