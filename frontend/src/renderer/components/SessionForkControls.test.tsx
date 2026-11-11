@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { memo, Profiler, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useUiStore } from "../stores/ui-store";
 import type { WorkspaceSession } from "../types/workspace";
-import { ForkableTurnContext, ForkSessionContext, ForkTextCopyNotice, TurnForkButton, useForkSessionFromMenu } from "./SessionForkControls";
+import { ForkableTurnContext, ForkSessionContext, ForkTextCopyNotice, LatestForkTurnContext, TurnForkButton, useForkSessionFromMenu } from "./SessionForkControls";
 import { useSessionMenuEntries } from "./SessionContextMenuItems";
 import { TooltipProvider } from "./ui/tooltip";
 
@@ -25,7 +25,9 @@ const session = { id: "p-1", workspaceId: "p", title: "Fix login", status: "idle
 function latestTurnFork(s: WorkspaceSession) {
 	return (
 		<ForkSessionContext.Provider value={s}>
-			<ForkableTurnContext.Provider value={{ turnId: "t-4", latest: true }}><TurnForkButton /></ForkableTurnContext.Provider>
+			<LatestForkTurnContext.Provider value="t-4">
+				<ForkableTurnContext.Provider value="t-4"><TurnForkButton /></ForkableTurnContext.Provider>
+			</LatestForkTurnContext.Provider>
 		</ForkSessionContext.Provider>
 	);
 }
@@ -96,9 +98,11 @@ describe("session fork controls", () => {
 		const chat = { ...session, mode: "chat" } as WorkspaceSession;
 		renderControls(
 			<ForkSessionContext.Provider value={chat}>
-				<ForkableTurnContext.Provider value={{ turnId: "t-4", latest: true }}><TurnForkButton /></ForkableTurnContext.Provider>
-				<ForkableTurnContext.Provider value={{ turnId: "t-3", latest: false }}><TurnForkButton /></ForkableTurnContext.Provider>
-				<ForkableTurnContext.Provider value={null}><TurnForkButton /></ForkableTurnContext.Provider>
+				<LatestForkTurnContext.Provider value="t-4">
+					<ForkableTurnContext.Provider value="t-4"><TurnForkButton /></ForkableTurnContext.Provider>
+					<ForkableTurnContext.Provider value="t-3"><TurnForkButton /></ForkableTurnContext.Provider>
+					<ForkableTurnContext.Provider value={null}><TurnForkButton /></ForkableTurnContext.Provider>
+				</LatestForkTurnContext.Provider>
 			</ForkSessionContext.Provider>,
 		);
 		const buttons = await screen.findAllByRole("button", { name: "Fork" });
@@ -127,7 +131,9 @@ describe("session fork controls", () => {
 		const chat = { ...session, mode: "chat" } as WorkspaceSession;
 		renderControls(
 			<ForkSessionContext.Provider value={chat}>
-				<ForkableTurnContext.Provider value={{ turnId: "t-2", latest: false }}><TurnForkButton /></ForkableTurnContext.Provider>
+				<LatestForkTurnContext.Provider value="t-4">
+					<ForkableTurnContext.Provider value="t-2"><TurnForkButton /></ForkableTurnContext.Provider>
+				</LatestForkTurnContext.Provider>
 			</ForkSessionContext.Provider>,
 		);
 		const button = await screen.findByRole("button", { name: "Fork" });
@@ -195,5 +201,37 @@ describe("session fork controls", () => {
 		});
 		await waitFor(() => expect(getMock).toHaveBeenCalled());
 		await waitFor(() => expect(result.current.find((entry) => entry.id === "session-fork")).toMatchObject({ disabled: false }));
+	});
+
+	it("doesn't re-render a turn's Fork button when the timeline re-renders with the same turn", async () => {
+		let renders = 0;
+		const Button = memo(function Button() {
+			return (
+				<Profiler id="fork" onRender={() => { renders++; }}>
+					<TurnForkButton />
+				</Profiler>
+			);
+		});
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		// The timeline re-renders on every streaming tick, recreating its providers.
+		const timeline = () => (
+			<QueryClientProvider client={client}>
+				<TooltipProvider>
+					<ForkSessionContext.Provider value={session}>
+						<LatestForkTurnContext.Provider value={"t-" + 4}>
+							<ForkableTurnContext.Provider value={"t-" + 4}><Button /></ForkableTurnContext.Provider>
+						</LatestForkTurnContext.Provider>
+					</ForkSessionContext.Provider>
+				</TooltipProvider>
+			</QueryClientProvider>
+		);
+		const { rerender } = render(timeline());
+		await screen.findByRole("button", { name: "Fork" });
+		await waitFor(() => expect(getMock).toHaveBeenCalled());
+		await act(async () => {});
+		const settled = renders;
+		rerender(timeline());
+		rerender(timeline());
+		expect(renders).toBe(settled);
 	});
 });

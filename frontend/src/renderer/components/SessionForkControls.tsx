@@ -17,9 +17,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 /** The session a chat timeline belongs to, so its turn rows can offer Fork. */
 export const ForkSessionContext = createContext<WorkspaceSession | null>(null);
-/** A finished turn's group: Fork copies the session as that turn left it. */
-export type ForkableTurn = { turnId: string; latest: boolean };
-export const ForkableTurnContext = createContext<ForkableTurn | null>(null);
+/** A finished turn's id, in a turn group that can be forked from. */
+export const ForkableTurnContext = createContext<string | null>(null);
+/**
+ * The latest finished turn's id: every agent can fork that one. Both values
+ * are strings, so a turn's Fork button re-renders only when they change.
+ */
+export const LatestForkTurnContext = createContext<string | undefined>(undefined);
 
 /** Whether a session can be forked, where it came from, and its forks. */
 export function useSessionForkOptions(session: WorkspaceSession | undefined, enabled = true) {
@@ -83,16 +87,17 @@ function useSessionFork(session: WorkspaceSession, turnId?: string) {
  */
 export function TurnForkButton() {
 	const session = useContext(ForkSessionContext);
-	const turn = useContext(ForkableTurnContext);
-	if (!session || !turn) return null;
-	return <TurnForkButtonInner session={session} turn={turn} />;
+	const turnId = useContext(ForkableTurnContext);
+	const latestTurnId = useContext(LatestForkTurnContext);
+	if (!session || !turnId) return null;
+	return <TurnForkButtonInner session={session} turnId={turnId} latest={turnId === latestTurnId} />;
 }
 
-function TurnForkButtonInner({ session, turn }: { session: WorkspaceSession; turn: ForkableTurn }) {
+function TurnForkButtonInner({ session, turnId, latest }: { session: WorkspaceSession; turnId: string; latest: boolean }) {
 	const { t } = useTranslation();
-	const fork = useSessionFork(session, turn.turnId);
+	const fork = useSessionFork(session, turnId);
 	// Older turns fork only where the agent can cut its copy at a turn.
-	if (!turn.latest && !fork.anyTurn) return null;
+	if (!latest && !fork.anyTurn) return null;
 	return (
 		<Tooltip>
 			<TooltipTrigger asChild>

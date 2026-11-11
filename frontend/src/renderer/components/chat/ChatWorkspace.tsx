@@ -5,7 +5,7 @@ import { FileAnnotationContext } from "./FileAnnotationPreview";
 import { useChatFind } from "../../hooks/useChatFind";
 import { occurrenceKey, type FindOccurrence } from "../../lib/chat-find";
 import "./chat-find.css";
-import { ForkableTurnContext, ForkTextCopyNotice } from "../SessionForkControls";
+import { ForkableTurnContext, ForkTextCopyNotice, LatestForkTurnContext } from "../SessionForkControls";
 import type { ChatFileReference, OpenFileAnnotation } from "../../../shared/chat-file-reference";
 import { TurnWorkSummary } from "./TurnWorkSummary";
 import { TurnSettleSnapshot } from "./TurnSettleSnapshot";
@@ -4243,10 +4243,10 @@ export function Timeline({
 		: groups.find((group) => group.items.some((item) => item.sequence >= find.gapBeforeSequence!))?.key;
 	// Fork is offered on finished turns; the latest is marked because every
 	// agent can fork it, while older turns need one that cuts its copy.
-	const latestForkGroupKey = useMemo(() => {
+	const latestForkTurnId = useMemo(() => {
 		for (let i = groups.length - 1; i >= 0; i--) {
 			const group = groups[i];
-			if (forkableGroup(group)) return group.key;
+			if (forkableGroup(group)) return group.turnId as string;
 		}
 		return undefined;
 	}, [groups]);
@@ -5074,7 +5074,8 @@ export function Timeline({
 								{group.key === findGapGroupKey ? <div role="note" className="py-3 text-center text-caption text-muted-foreground">{t("chat.find.gap")}</div> : null}
 								<WorkerUpdateIndexContext.Provider value={workerUpdateIndex}>
 								<BatchedReportsContext.Provider value={batchedReports}>
-								<ForkableTurnContext.Provider value={forkableGroup(group) ? { turnId: group.turnId as string, latest: group.key === latestForkGroupKey } : null}>
+								<LatestForkTurnContext.Provider value={latestForkTurnId}>
+								<ForkableTurnContext.Provider value={forkableGroup(group) ? (group.turnId as string) : null}>
 								<TurnGroup
 									group={group}
 									harness={snapshot.harness}
@@ -5123,6 +5124,7 @@ export function Timeline({
 									queued={Boolean(group.turnId && queued.has(group.turnId))}
 								/>
 								</ForkableTurnContext.Provider>
+								</LatestForkTurnContext.Provider>
 								</BatchedReportsContext.Provider>
 								</WorkerUpdateIndexContext.Provider>
 							</div>
