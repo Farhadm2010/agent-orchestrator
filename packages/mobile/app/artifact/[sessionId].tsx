@@ -4,7 +4,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import { AccessibilityInfo, ActivityIndicator, FlatList, Image, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent, type ViewToken } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
-import { artifactFileUrl, artifactImageSource, artifactMarkdownImageSource, artifactStreamSource, getArtifactHead, getArtifactSize, getArtifactText } from "../../lib/api";
+import { ArtifactTextTooLargeError, artifactFileUrl, artifactImageSource, artifactMarkdownImageSource, artifactStreamSource, getArtifactHead, getArtifactSize, getArtifactTextWithin } from "../../lib/api";
 import { ArtifactMedia } from "../../lib/ArtifactMedia";
 import { ArtifactPdf } from "../../lib/ArtifactPdf";
 import { ArtifactTable } from "../../lib/ArtifactTable";
@@ -466,7 +466,7 @@ function ArtifactBody({ config, sessionId, artifact, active, versionOf, onAsk }:
 		}
 		case "pdf":
 			// Android's WebView has no PDF viewer: the platform's renderer draws it instead.
-			return Platform.OS === "android" ? <ArtifactPdf config={config} sessionId={sessionId} artifact={artifact} /> : <ArtifactWeb config={config} url={url} version={artifact.updatedAt} />;
+			return Platform.OS === "android" ? <ArtifactPdf config={config} sessionId={sessionId} artifact={artifact} active={active} label={artifactFormatLabel(artifact)} hint={hint} /> : <ArtifactWeb config={config} url={url} version={artifact.updatedAt} />;
 		case "binary":
 			return <NoPreview artifact={artifact} />;
 		case "image": {
@@ -645,7 +645,7 @@ function ArtifactImage({ source, name }: { source: { uri: string; headers: Recor
 	);
 }
 
-type TextState = { key: string; text?: string; error?: string };
+type TextState = { key: string; text?: string; error?: string; tooLarge?: boolean };
 
 type TextKind = "markdown" | "text" | "table" | "diagram";
 
@@ -664,13 +664,21 @@ function ArtifactText({ config, sessionId, artifact, kind, versionOf, onAsk }: {
 	const resolveImage = useCallback((url: string): MarkdownImageSource | undefined => artifactMarkdownImageSource(config, sessionId, artifact.path, url, versionOf), [artifact.path, config, sessionId, versionOf]);
 	useEffect(() => {
 		const controller = new AbortController();
-		getArtifactText(config, sessionId, artifact.path, { signal: controller.signal })
+		// Bounded: a file larger than its listed size said (it grew) is never read whole.
+		getArtifactTextWithin(config, sessionId, artifact.path, MAX_ARTIFACT_TEXT_BYTES, { signal: controller.signal })
 			.then((text) => setState({ key, text }))
-			.catch((cause) => { if (!controller.signal.aborted) setState({ key, error: userFacingError(cause) }); });
+			.catch((cause) => {
+				if (controller.signal.aborted) return;
+				setState(cause instanceof ArtifactTextTooLargeError ? { key, tooLarge: true } : { key, error: userFacingError(cause) });
+			});
 		return () => controller.abort();
 	}, [artifact.path, attempt, config, key, sessionId]);
 	// The previous version stays up while the next one loads.
 	const text = state?.text;
+	if (state?.key === key && state.tooLarge) {
+		const url = artifactFileUrl(config, sessionId, artifact.path);
+		if (url) return <LargeArtifact config={config} sessionId={sessionId} artifact={artifact} url={url} />;
+	}
 	if (text === undefined) {
 		if (state?.key === key && state.error) return <Unavailable title="Couldn't load the artifact" message={state.error} action={<Button title="Try again" icon="refresh-cw" onPress={() => setAttempt((n) => n + 1)} />} />;
 		return <View style={styles.center}><ActivityIndicator color={t.accent} /></View>;
