@@ -124,7 +124,8 @@ func (m *Manager) reconcile(ctx context.Context) {
 		}
 	}
 	for _, rec := range shells {
-		if !rec.Transient {
+		// An ended shell has no program left to title it.
+		if !rec.Transient && rec.EndedAt == nil {
 			want[terminalKey{shell: rec.HandleID}] = rec.HandleID
 		}
 	}
