@@ -490,7 +490,9 @@ func TestOlderTurnForkGetsThatTurnsArtifacts(t *testing.T) {
 		"old/gone.md":   {{Path: "old/gone.md", Version: 1, SHA256: gone, ModTime: before}},
 	}}
 	dst := t.TempDir()
-	m.copyForkArtifactsAsOf(context.Background(), "mer-0", dst, cutoff)
+	if err := m.copyForkArtifactsAsOf(context.Background(), "mer-0", dst, cutoff); err != nil {
+		t.Fatal(err)
+	}
 	if b, _ := os.ReadFile(filepath.Join(dst, "old", "gone.md")); string(b) != "deleted later" {
 		t.Fatalf("old/gone.md = %q, want the artifact as it was at that turn, though deleted since", b)
 	}
@@ -515,7 +517,9 @@ func TestLatestTurnForkSkipsTheVersionStore(t *testing.T) {
 	writeTestFile(t, filepath.Join(src, "report.md"), "current")
 	writeArtifactBlob(t, src, "current")
 	dst := t.TempDir()
-	m.copyForkArtifacts(context.Background(), "mer-0", dst)
+	if err := m.copyForkArtifacts(context.Background(), "mer-0", dst); err != nil {
+		t.Fatal(err)
+	}
 	if b, _ := os.ReadFile(filepath.Join(dst, "report.md")); string(b) != "current" {
 		t.Fatalf("report.md = %q", b)
 	}
@@ -713,7 +717,9 @@ func TestForkCopiesOnlyTheAttachmentsItsTurnHad(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m.copyForkAttachments(context.Background(), &ports.SpawnFork{SourceSessionID: "mer-0", LimitAttachments: true, AttachmentNames: []string{"image-early.png", "../escape"}}, "mer-1")
+	if err := m.copyForkAttachments(context.Background(), &ports.SpawnFork{SourceSessionID: "mer-0", LimitAttachments: true, AttachmentNames: []string{"image-early.png", "../escape"}}, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
 	dst := filepath.Join(m.dataDir, "attachments", "mer-1")
 	if _, err := os.Stat(filepath.Join(dst, "image-early.png")); err != nil {
 		t.Fatalf("the turn's attachment wasn't copied: %v", err)
@@ -722,10 +728,42 @@ func TestForkCopiesOnlyTheAttachmentsItsTurnHad(t *testing.T) {
 		t.Fatalf("an attachment from after the turn was copied: %v", err)
 	}
 
-	m.copyForkAttachments(context.Background(), &ports.SpawnFork{SourceSessionID: "mer-0"}, "mer-2")
+	if err := m.copyForkAttachments(context.Background(), &ports.SpawnFork{SourceSessionID: "mer-0"}, "mer-2"); err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"image-early.png", "image-later.png"} {
 		if _, err := os.Stat(filepath.Join(m.dataDir, "attachments", "mer-2", name)); err != nil {
 			t.Fatalf("a latest-turn fork is missing %s: %v", name, err)
+		}
+	}
+}
+
+// A fork whose artifacts can't all be copied must not start with some of
+// them missing: the spawn fails and leaves nothing behind.
+func TestForkFailsWhenItsArtifactsCannotBeCopied(t *testing.T) {
+	launcher := &recordingLauncher{}
+	m, st, _ := newChatManager(launcher)
+	m.dataDir = t.TempDir()
+	unreadable := filepath.Join(m.artifactDir("mer-0"), "report.md")
+	writeTestFile(t, unreadable, "report")
+	if err := os.Chmod(unreadable, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o600) })
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		RequestedMode: domain.SessionModeChat,
+		Fork:          &ports.SpawnFork{SourceSessionID: "mer-0", StartPoint: "abc"},
+	})
+	if !errors.Is(err, ErrSpawnArtifactDir) {
+		t.Fatalf("spawn = %v, want ErrSpawnArtifactDir", err)
+	}
+	if len(launcher.started) != 0 {
+		t.Fatalf("started = %+v", launcher.started)
+	}
+	for id := range st.sessions {
+		if id != "mer-0" && !st.sessions[id].IsTerminated {
+			t.Fatalf("the failed fork %s was left behind", id)
 		}
 	}
 }

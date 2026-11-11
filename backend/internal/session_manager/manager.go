@@ -1248,14 +1248,20 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	// seed instead of written here, since that call replaces the whole row.
 	artifactDir := m.reserveArtifactDir(id)
 	if cfg.Fork != nil {
-		if artifactDir != "" {
-			if cfg.Fork.ArtifactsAsOf.IsZero() {
-				m.copyForkArtifacts(ctx, cfg.Fork.SourceSessionID, artifactDir)
+		// A fork missing some of its original's files would start out of step
+		// with the conversation it copies, so a failed copy fails the spawn.
+		if err := m.copyForkFiles(ctx, cfg.Fork, id, artifactDir); err != nil {
+			m.cleanupArtifactDir(id)
+			if prep != nil {
+				cleanupCtx, cancel := spawnRollbackContext(ctx)
+				m.discardClaimedTaskPreparation(cleanupCtx, prep)
+				m.cleanupAttachments(cleanupCtx, id)
+				cancel()
 			} else {
-				m.copyForkArtifactsAsOf(ctx, cfg.Fork.SourceSessionID, artifactDir, cfg.Fork.ArtifactsAsOf)
+				m.rollbackSpawnSeedRow(ctx, id)
 			}
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnArtifactDir, err)
 		}
-		m.copyForkAttachments(ctx, cfg.Fork, id)
 	}
 	if prep == nil {
 		rec.Metadata.ArtifactDir = artifactDir

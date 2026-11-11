@@ -101,18 +101,36 @@ func (m *Manager) createForkWorkspace(ctx context.Context, fork *ports.SpawnFork
 	return ws, nil, nil
 }
 
+// copyForkFiles copies the source's artifacts into the fork's artifact
+// folder, as of the forked turn when the fork has one, and its message
+// attachments into the fork's own store.
+func (m *Manager) copyForkFiles(ctx context.Context, fork *ports.SpawnFork, id domain.SessionID, artifactDir string) error {
+	if artifactDir != "" {
+		var err error
+		if fork.ArtifactsAsOf.IsZero() {
+			err = m.copyForkArtifacts(ctx, fork.SourceSessionID, artifactDir)
+		} else {
+			err = m.copyForkArtifactsAsOf(ctx, fork.SourceSessionID, artifactDir, fork.ArtifactsAsOf)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return m.copyForkAttachments(ctx, fork, id)
+}
+
 // copyForkArtifacts copies the source's artifact files into the fork's own
 // folder, so the fork's links and edits never touch the original's. The
 // version store is not copied: the fork's history of its artifacts starts
-// fresh. A failure only loses artifacts, so it is logged rather than failing
-// the fork.
-func (m *Manager) copyForkArtifacts(ctx context.Context, source domain.SessionID, dst string) {
+// fresh.
+func (m *Manager) copyForkArtifacts(ctx context.Context, source domain.SessionID, dst string) error {
 	if source == "" {
-		return
+		return nil
 	}
 	if err := copyTree(ctx, m.artifactDir(source), dst, sessionartifacts.VersionsDir, nil); err != nil {
-		m.logger.Warn("session fork: copy artifacts", "source", source, "err", err)
+		return fmt.Errorf("copy artifacts of %s: %w", source, err)
 	}
+	return nil
 }
 
 type artifactVersionLister interface {
@@ -125,7 +143,7 @@ type artifactVersionLister interface {
 // modified by then; a file first written later is left out, and one deleted
 // since still comes from its saved version. A file with no saved versions
 // goes by its modification time.
-func (m *Manager) copyForkArtifactsAsOf(ctx context.Context, source domain.SessionID, dst string, asOf time.Time) {
+func (m *Manager) copyForkArtifactsAsOf(ctx context.Context, source domain.SessionID, dst string, asOf time.Time) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	src := m.artifactDir(source)
@@ -153,14 +171,12 @@ func (m *Manager) copyForkArtifactsAsOf(ctx context.Context, source domain.Sessi
 		return nil
 	})
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		m.logger.Warn("session fork: list artifacts as of a turn", "source", source, "err", err)
-		return
+		return fmt.Errorf("list artifacts of %s: %w", source, err)
 	}
 	if lister != nil {
 		latest, err := lister.ListLatestSessionArtifactVersions(ctx, source)
 		if err != nil {
-			m.logger.Warn("session fork: list saved artifact versions", "source", source, "err", err)
-			return
+			return fmt.Errorf("list saved artifact versions of %s: %w", source, err)
 		}
 		for _, version := range latest {
 			paths[version.Path] = true
@@ -168,9 +184,10 @@ func (m *Manager) copyForkArtifactsAsOf(ctx context.Context, source domain.Sessi
 	}
 	for rel := range paths {
 		if err := m.copyArtifactAsOf(ctx, lister, source, src, dst, rel, asOf); err != nil {
-			m.logger.Warn("session fork: copy artifact as of a turn", "source", source, "path", rel, "err", err)
+			return fmt.Errorf("copy artifact %s of %s: %w", rel, source, err)
 		}
 	}
+	return nil
 }
 
 // copyArtifactAsOf copies one artifact path as it was at asOf, if it existed.
@@ -224,9 +241,9 @@ func copyRegularFileMkdir(from, to string) error {
 // the fork's own store; they are placed in the fork's worktree once it exists.
 // A fork of an older turn takes only the attachments its conversation had by
 // then.
-func (m *Manager) copyForkAttachments(ctx context.Context, fork *ports.SpawnFork, id domain.SessionID) {
+func (m *Manager) copyForkAttachments(ctx context.Context, fork *ports.SpawnFork, id domain.SessionID) error {
 	if fork.SourceSessionID == "" || m.dataDir == "" {
-		return
+		return nil
 	}
 	var only map[string]bool
 	if fork.LimitAttachments {
@@ -237,8 +254,9 @@ func (m *Manager) copyForkAttachments(ctx context.Context, fork *ports.SpawnFork
 	}
 	root := filepath.Join(m.dataDir, "attachments")
 	if err := copyTree(ctx, filepath.Join(root, string(fork.SourceSessionID)), filepath.Join(root, string(id)), "", only); err != nil {
-		m.logger.Warn("session fork: copy attachments", "source", fork.SourceSessionID, "err", err)
+		return fmt.Errorf("copy attachments of %s: %w", fork.SourceSessionID, err)
 	}
+	return nil
 }
 
 // copyTree copies regular files and folders, skipping symlinks, special
