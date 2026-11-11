@@ -198,7 +198,12 @@ func TestTurnsAreNotSnapshottedForAnAgentThatCannotRollBack(t *testing.T) {
 // where the preview reads it.
 func newGitHarness(t *testing.T, conv ports.ChatConversation, workspace string) *harness {
 	t.Helper()
-	h := newHarnessInWorkspace(t, conv, func(st *sqlite.Store) chatsvc.Store { return st }, domain.HarnessCodex, workspace)
+	return newGitHarnessFor(t, conv, workspace, domain.HarnessCodex)
+}
+
+func newGitHarnessFor(t *testing.T, conv ports.ChatConversation, workspace string, agent domain.AgentHarness) *harness {
+	t.Helper()
+	h := newHarnessInWorkspace(t, conv, func(st *sqlite.Store) chatsvc.Store { return st }, agent, workspace)
 	record, found, err := h.st.GetSession(context.Background(), testSession)
 	if err != nil || !found {
 		t.Fatalf("read seeded session: found=%v, err=%v", found, err)
@@ -247,13 +252,14 @@ func gitOutputIn(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// With session forks on, every turn is snapshotted so a fork of an older turn
-// can start from that turn's files, even where rollback can't use them.
+// With session forks on, a turn of an agent that can fork older turns is
+// snapshotted so such a fork can start from that turn's files, even where
+// rollback can't use them.
 func TestForksSnapshotTurnsForAnAgentThatCannotRollBack(t *testing.T) {
 	chatsvc.EnableForkSnapshots(true)
 	t.Cleanup(func() { chatsvc.EnableForkSnapshots(false) })
 	workspace := gitWorkspace(t)
-	h := newGitHarness(t, nil, workspace)
+	h := newGitHarnessFor(t, nil, workspace, domain.HarnessClaudeCode)
 
 	completeTurn(t, h, "only", "provider-turn-1")
 	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool { return len(s.Messages) == 2 })
@@ -279,12 +285,42 @@ func TestForksKeepArtifactsAtEachTurnStart(t *testing.T) {
 		chatsvc.SetTurnArtifactSnapshot(nil)
 	})
 	workspace := gitWorkspace(t)
-	h := newGitHarness(t, nil, workspace)
+	h := newGitHarnessFor(t, nil, workspace, domain.HarnessClaudeCode)
 	completeTurn(t, h, "only", "provider-turn-1")
 	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool { return len(s.Messages) == 2 })
 	mu.Lock()
 	defer mu.Unlock()
 	if len(kept) == 0 || kept[0] != testSession {
 		t.Fatalf("artifacts kept for %v", kept)
+	}
+}
+
+// An agent that can fork only its latest turn never forks from an older
+// turn's snapshot, so its turns don't wait for one, even with forks on.
+func TestForksDontSnapshotAnAgentThatOnlyForksItsLatestTurn(t *testing.T) {
+	chatsvc.EnableForkSnapshots(true)
+	var mu sync.Mutex
+	artifactSnapshots := 0
+	chatsvc.SetTurnArtifactSnapshot(func(context.Context, domain.SessionID) {
+		mu.Lock()
+		defer mu.Unlock()
+		artifactSnapshots++
+	})
+	t.Cleanup(func() {
+		chatsvc.EnableForkSnapshots(false)
+		chatsvc.SetTurnArtifactSnapshot(nil)
+	})
+	workspace := gitWorkspace(t)
+	h := newGitHarnessFor(t, nil, workspace, domain.HarnessCopilot)
+	completeTurn(t, h, "only", "provider-turn-1")
+	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool { return len(s.Messages) == 2 })
+
+	if refs := gitOutputIn(t, workspace, "for-each-ref", "refs/ao/"); refs != "" {
+		t.Fatalf("snapshot refs = %q, want none", refs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if artifactSnapshots != 0 {
+		t.Fatalf("artifacts were kept %d times, want none", artifactSnapshots)
 	}
 }

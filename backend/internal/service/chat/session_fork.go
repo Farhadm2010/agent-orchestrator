@@ -59,9 +59,7 @@ func (s *Service) SessionForkSource(ctx context.Context, rec domain.SessionRecor
 	if err != nil {
 		return sessionfork.Source{}, fmt.Errorf("session fork: load conversation: %w", err)
 	}
-	// Claude cuts its copy at any message and Codex at any turn; other agents
-	// copy their current context only.
-	anyTurn := mode == forkIntoWorkspace || rec.Harness == domain.HarnessCodex
+	anyTurn := forksOlderTurns(rec.Harness)
 	plan := sessionForkPlan{
 		driver: driver, sourceProviderID: providerID, sourceWorkspace: rec.Metadata.WorkspacePath,
 		model: rec.Metadata.Model, effort: rec.Metadata.Effort, permissions: rec.Metadata.Permissions,
@@ -297,6 +295,15 @@ func (p sessionForkPlan) prepare(ctx context.Context, target ports.ForkTarget) (
 		return "", errors.New("session fork: agent returned no independent conversation")
 	}
 	return id, nil
+}
+
+// forksOlderTurns reports whether a session fork of this agent can start
+// from an older turn: Claude cuts its copy at any message and Codex at any
+// turn, while other agents copy their current context only. Only such a fork
+// reads the snapshot saved as each turn starts, so only these agents' turns
+// take one for forks.
+func forksOlderTurns(harness domain.AgentHarness) bool {
+	return harness == domain.HarnessClaudeCode || harness == domain.HarnessCodex
 }
 
 // textHandoffForkSource forks a session whose agent can't copy its own

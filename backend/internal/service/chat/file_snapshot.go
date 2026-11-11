@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -13,9 +14,9 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-// forkSnapshots makes every turn save a snapshot, not just turns of agents
-// that can roll back: a session fork of an older turn starts from it. It is
-// on while session forks are enabled.
+// forkSnapshots also makes the turns of agents whose forks can start from an
+// older turn save a snapshot, not just turns of agents that can roll back: such
+// a fork starts from it. It is on while session forks are enabled.
 var forkSnapshots atomic.Bool
 
 // EnableForkSnapshots turns on a snapshot before every turn, for session forks.
@@ -132,24 +133,34 @@ func planFileRestore(ctx context.Context, workspace string, session domain.Sessi
 }
 
 // snapshotFiles records the worktree before turns reach the provider, so rolling
-// one back can also put its files back. Only a session whose agent can roll back
-// gets one, and a failure never holds the turn: it only means that turn's
-// rollback cannot restore files.
+// one back can also put its files back, and a fork of an older turn can start
+// from them. Only a session whose agent can roll back, or whose forks can start
+// from an older turn, gets one; other turns never wait for it. A failure never
+// holds the turn: it only means that turn's files can't be restored or forked.
 func (c *Controller) snapshotFiles(ctx context.Context, turnIDs []string) {
-	if snapshot := turnArtifactSnapshot.Load(); snapshot != nil && forkSnapshots.Load() && c.reviewID == "" {
-		(*snapshot)(ctx, c.sessionID)
-	}
 	_, rollsBack := c.conv.(ports.ChatRollbacker)
-	if (!rollsBack && !forkSnapshots.Load()) || c.workspacePath == "" || c.reviewID != "" {
+	forForks := forkSnapshots.Load() && forksOlderTurns(c.harness) && c.reviewID == ""
+	// The session's artifacts are kept alongside the files, not after them, so
+	// the turn waits for the slower of the two rather than both.
+	var artifacts sync.WaitGroup
+	if snapshot := turnArtifactSnapshot.Load(); snapshot != nil && forForks {
+		artifacts.Add(1)
+		go func(ctx context.Context, id domain.SessionID) {
+			defer artifacts.Done()
+			(*snapshot)(ctx, id)
+		}(ctx, c.sessionID)
+	}
+	defer artifacts.Wait()
+	if (!rollsBack && !forForks) || c.workspacePath == "" || c.reviewID != "" {
 		return
 	}
 	refs := make([]string, len(turnIDs))
 	for i, turnID := range turnIDs {
 		refs[i] = filesnapshot.Ref(c.sessionID, turnID)
 	}
-	ctx, cancel := context.WithTimeout(ctx, fileSnapshotBudget)
+	captureCtx, cancel := context.WithTimeout(ctx, fileSnapshotBudget)
 	defer cancel()
-	if err := filesnapshot.Capture(ctx, c.workspacePath, refs...); err != nil {
+	if err := filesnapshot.Capture(captureCtx, c.workspacePath, refs...); err != nil {
 		level := slog.LevelWarn
 		switch {
 		case errors.Is(err, filesnapshot.ErrNotRepository):
