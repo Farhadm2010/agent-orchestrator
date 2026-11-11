@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -101,6 +102,8 @@ func (s *Service) SessionForkSource(ctx context.Context, rec domain.SessionRecor
 		return sessionfork.Source{Refusal: sessionfork.CodeNativeMissing}, nil
 	}
 	source := sessionfork.Source{LatestTurnID: turn.ID, ContextMode: domain.ForkContextNativeTurn, AnyTurn: anyTurn, PrepareChat: plan.prepare}
+	// Attachments sent after this turn aren't the fork's.
+	source.LimitAttachments, source.AttachmentNames = true, attachmentsUpToTurn(rows, turn.ID)
 	if next.ID != "" {
 		// The files as this turn left them are the ones saved before the
 		// next turn started, for rollback.
@@ -334,4 +337,39 @@ func (s *Service) textHandoffForkSource(ctx context.Context, rec domain.SessionR
 			return s.ForkHandoffNote(ctx, source, target, "")
 		},
 	}, nil
+}
+
+// attachmentPath matches a message's reference to one of its session's
+// attachments, as the worktree path agents read it from.
+var attachmentPath = regexp.MustCompile(`\.ao/attachments/([A-Za-z0-9][A-Za-z0-9._-]*)`)
+
+// attachmentsUpToTurn names the attachments referenced by messages of turnID
+// and the turns before it, sorted. A rolled-back turn's messages don't count.
+func attachmentsUpToTurn(rows ConversationRows, turnID string) []string {
+	inPrefix := map[string]bool{}
+	for _, turn := range rows.Turns {
+		if turn.RolledBackAt == nil {
+			inPrefix[turn.ID] = true
+		}
+		if turn.ID == turnID {
+			break
+		}
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, message := range rows.Messages {
+		if !inPrefix[message.TurnID] {
+			continue
+		}
+		for _, text := range []string{message.Text, message.DeliveryContentJSON} {
+			for _, match := range attachmentPath.FindAllStringSubmatch(text, -1) {
+				if name := match[1]; !seen[name] {
+					seen[name] = true
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }

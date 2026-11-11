@@ -1250,12 +1250,12 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	if cfg.Fork != nil {
 		if artifactDir != "" {
 			if cfg.Fork.ArtifactsAsOf.IsZero() {
-				m.copyForkArtifacts(cfg.Fork.SourceSessionID, artifactDir)
+				m.copyForkArtifacts(ctx, cfg.Fork.SourceSessionID, artifactDir)
 			} else {
-				m.copyForkArtifactsAsOf(cfg.Fork.SourceSessionID, artifactDir, cfg.Fork.ArtifactsAsOf)
+				m.copyForkArtifactsAsOf(ctx, cfg.Fork.SourceSessionID, artifactDir, cfg.Fork.ArtifactsAsOf)
 			}
 		}
-		m.copyForkAttachments(cfg.Fork.SourceSessionID, id)
+		m.copyForkAttachments(ctx, cfg.Fork, id)
 	}
 	if prep == nil {
 		rec.Metadata.ArtifactDir = artifactDir

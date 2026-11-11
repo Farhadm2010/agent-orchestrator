@@ -85,9 +85,13 @@ type Source struct {
 	FilesSnapshotRef string
 	// FilesAsOf is when that snapshot was taken; artifacts are copied as
 	// they were then.
-	FilesAsOf       time.Time
-	PrepareChat     func(ctx context.Context, target ports.ForkTarget) (string, error)
-	PrepareTerminal func(ctx context.Context, target ports.ForkTarget) (ports.ForkTerminalLaunch, error)
+	FilesAsOf time.Time
+	// LimitAttachments, for an older turn, copies only AttachmentNames: the
+	// attachments the conversation had by that turn.
+	LimitAttachments bool
+	AttachmentNames  []string
+	PrepareChat      func(ctx context.Context, target ports.ForkTarget) (string, error)
+	PrepareTerminal  func(ctx context.Context, target ports.ForkTarget) (ports.ForkTerminalLaunch, error)
 	// Handoff builds the text copy of the conversation a text-handoff fork's
 	// fresh agent starts with.
 	Handoff func(ctx context.Context, target ports.ForkTarget) (string, error)
@@ -399,16 +403,18 @@ func (p forkPlan) dropSeed(ctx context.Context, seeds Seeds) {
 
 func (p forkPlan) spawnFork() *ports.SpawnFork {
 	return &ports.SpawnFork{
-		SourceSessionID: p.source.ID,
-		StartPoint:      p.head,
-		SeedRef:         p.seedRef,
-		KeepSeedRef:     p.keepSeed,
-		SourceTitle:     p.title,
-		SourceWorkspace: p.source.Metadata.WorkspacePath,
-		ArtifactsAsOf:   p.agent.FilesAsOf,
-		PrepareChat:     p.agent.PrepareChat,
-		PrepareTerminal: p.agent.PrepareTerminal,
-		Handoff:         p.agent.Handoff,
+		SourceSessionID:  p.source.ID,
+		StartPoint:       p.head,
+		SeedRef:          p.seedRef,
+		KeepSeedRef:      p.keepSeed,
+		SourceTitle:      p.title,
+		SourceWorkspace:  p.source.Metadata.WorkspacePath,
+		ArtifactsAsOf:    p.agent.FilesAsOf,
+		LimitAttachments: p.agent.LimitAttachments,
+		AttachmentNames:  p.agent.AttachmentNames,
+		PrepareChat:      p.agent.PrepareChat,
+		PrepareTerminal:  p.agent.PrepareTerminal,
+		Handoff:          p.agent.Handoff,
 	}
 }
 

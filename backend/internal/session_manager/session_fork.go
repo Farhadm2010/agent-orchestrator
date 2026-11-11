@@ -106,74 +106,111 @@ func (m *Manager) createForkWorkspace(ctx context.Context, fork *ports.SpawnFork
 // version store is not copied: the fork's history of its artifacts starts
 // fresh. A failure only loses artifacts, so it is logged rather than failing
 // the fork.
-func (m *Manager) copyForkArtifacts(source domain.SessionID, dst string) {
+func (m *Manager) copyForkArtifacts(ctx context.Context, source domain.SessionID, dst string) {
 	if source == "" {
 		return
 	}
-	if err := copyTree(m.artifactDir(source), dst, sessionartifacts.VersionsDir); err != nil {
+	if err := copyTree(ctx, m.artifactDir(source), dst, sessionartifacts.VersionsDir, nil); err != nil {
 		m.logger.Warn("session fork: copy artifacts", "source", source, "err", err)
 	}
 }
 
 type artifactVersionLister interface {
 	ListSessionArtifactVersions(ctx context.Context, id domain.SessionID, path string) ([]domain.SessionArtifactVersion, error)
+	ListLatestSessionArtifactVersions(ctx context.Context, id domain.SessionID) ([]domain.SessionArtifactVersion, error)
 }
 
 // copyForkArtifactsAsOf copies the source's artifacts as they were at asOf,
 // for a fork of an older turn. Each file takes its newest saved version
-// modified by then; a file first written later is left out. A file with no
-// saved versions goes by its modification time.
-func (m *Manager) copyForkArtifactsAsOf(source domain.SessionID, dst string, asOf time.Time) {
+// modified by then; a file first written later is left out, and one deleted
+// since still comes from its saved version. A file with no saved versions
+// goes by its modification time.
+func (m *Manager) copyForkArtifactsAsOf(ctx context.Context, source domain.SessionID, dst string, asOf time.Time) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	src := m.artifactDir(source)
 	lister, _ := m.store.(artifactVersionLister)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Every path the session has had: the files there now, and any saved
+	// in the version store, which keeps deleted ones.
+	paths := map[string]bool{}
 	err := filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			if rel == sessionartifacts.VersionsDir {
-				return filepath.SkipDir
-			}
-			return nil
+		if entry.IsDir() && rel == sessionartifacts.VersionsDir {
+			return filepath.SkipDir
 		}
-		if !entry.Type().IsRegular() {
-			return nil
+		if entry.Type().IsRegular() {
+			paths[filepath.ToSlash(rel)] = true
 		}
-		target := filepath.Join(dst, rel)
-		var versions []domain.SessionArtifactVersion
-		if lister != nil {
-			if versions, err = lister.ListSessionArtifactVersions(ctx, source, filepath.ToSlash(rel)); err != nil {
-				return err
-			}
-		}
-		if len(versions) == 0 {
-			info, err := entry.Info()
-			if err != nil || info.ModTime().After(asOf) {
-				return err
-			}
-			return copyRegularFileMkdir(path, target)
-		}
-		var chosen *domain.SessionArtifactVersion
-		for i := range versions {
-			if !versions[i].ModTime.After(asOf) && (chosen == nil || versions[i].Version > chosen.Version) {
-				chosen = &versions[i]
-			}
-		}
-		if chosen == nil {
-			return nil // first written after that turn
-		}
-		blob := filepath.Join(src, sessionartifacts.VersionsDir, "blobs", chosen.SHA256[:2], chosen.SHA256)
-		return copyRegularFileMkdir(blob, target)
+		return nil
 	})
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		m.logger.Warn("session fork: copy artifacts as of a turn", "source", source, "err", err)
+		m.logger.Warn("session fork: list artifacts as of a turn", "source", source, "err", err)
+		return
 	}
+	if lister != nil {
+		latest, err := lister.ListLatestSessionArtifactVersions(ctx, source)
+		if err != nil {
+			m.logger.Warn("session fork: list saved artifact versions", "source", source, "err", err)
+			return
+		}
+		for _, version := range latest {
+			paths[version.Path] = true
+		}
+	}
+	for rel := range paths {
+		if err := m.copyArtifactAsOf(ctx, lister, source, src, dst, rel, asOf); err != nil {
+			m.logger.Warn("session fork: copy artifact as of a turn", "source", source, "path", rel, "err", err)
+		}
+	}
+}
+
+// copyArtifactAsOf copies one artifact path as it was at asOf, if it existed.
+func (m *Manager) copyArtifactAsOf(ctx context.Context, lister artifactVersionLister, source domain.SessionID, src, dst, rel string, asOf time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	local := filepath.FromSlash(rel)
+	if !filepath.IsLocal(local) {
+		return nil
+	}
+	target := filepath.Join(dst, local)
+	var versions []domain.SessionArtifactVersion
+	if lister != nil {
+		var err error
+		if versions, err = lister.ListSessionArtifactVersions(ctx, source, rel); err != nil {
+			return err
+		}
+	}
+	if len(versions) == 0 {
+		info, err := os.Lstat(filepath.Join(src, local))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil || !info.Mode().IsRegular() || info.ModTime().After(asOf) {
+			return err
+		}
+		return copyRegularFileMkdir(filepath.Join(src, local), target)
+	}
+	var chosen *domain.SessionArtifactVersion
+	for i := range versions {
+		if !versions[i].ModTime.After(asOf) && (chosen == nil || versions[i].Version > chosen.Version) {
+			chosen = &versions[i]
+		}
+	}
+	if chosen == nil {
+		return nil // first written after that turn
+	}
+	blob := filepath.Join(src, sessionartifacts.VersionsDir, "blobs", chosen.SHA256[:2], chosen.SHA256)
+	return copyRegularFileMkdir(blob, target)
 }
 
 func copyRegularFileMkdir(from, to string) error {
@@ -185,21 +222,34 @@ func copyRegularFileMkdir(from, to string) error {
 
 // copyForkAttachments copies the files attached to the source's messages into
 // the fork's own store; they are placed in the fork's worktree once it exists.
-func (m *Manager) copyForkAttachments(source, fork domain.SessionID) {
-	if source == "" || m.dataDir == "" {
+// A fork of an older turn takes only the attachments its conversation had by
+// then.
+func (m *Manager) copyForkAttachments(ctx context.Context, fork *ports.SpawnFork, id domain.SessionID) {
+	if fork.SourceSessionID == "" || m.dataDir == "" {
 		return
 	}
+	var only map[string]bool
+	if fork.LimitAttachments {
+		only = map[string]bool{}
+		for _, name := range fork.AttachmentNames {
+			only[name] = true
+		}
+	}
 	root := filepath.Join(m.dataDir, "attachments")
-	if err := copyTree(filepath.Join(root, string(source)), filepath.Join(root, string(fork)), ""); err != nil {
-		m.logger.Warn("session fork: copy attachments", "source", source, "err", err)
+	if err := copyTree(ctx, filepath.Join(root, string(fork.SourceSessionID)), filepath.Join(root, string(id)), "", only); err != nil {
+		m.logger.Warn("session fork: copy attachments", "source", fork.SourceSessionID, "err", err)
 	}
 }
 
 // copyTree copies regular files and folders, skipping symlinks, special
-// files, and a top-level folder named skip. A missing src is not an error.
-func copyTree(src, dst, skip string) error {
+// files, and a top-level folder named skip. With only set, it copies just the
+// top-level files named there. A missing src is not an error.
+func copyTree(ctx context.Context, src, dst, skip string, only map[string]bool) error {
 	err := filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		rel, err := filepath.Rel(src, path)
@@ -212,8 +262,14 @@ func copyTree(src, dst, skip string) error {
 		target := filepath.Join(dst, rel)
 		switch {
 		case entry.IsDir():
+			if only != nil && rel != "." {
+				return filepath.SkipDir
+			}
 			return os.MkdirAll(target, 0o700)
 		case entry.Type().IsRegular():
+			if only != nil && !only[rel] {
+				return nil
+			}
 			return copyRegularFile(path, target)
 		default:
 			return nil

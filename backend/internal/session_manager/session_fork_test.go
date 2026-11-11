@@ -446,6 +446,14 @@ func (s artifactVersionStore) ListSessionArtifactVersions(_ context.Context, _ d
 	return s.versions[path], nil
 }
 
+func (s artifactVersionStore) ListLatestSessionArtifactVersions(_ context.Context, _ domain.SessionID) ([]domain.SessionArtifactVersion, error) {
+	var latest []domain.SessionArtifactVersion
+	for _, versions := range s.versions {
+		latest = append(latest, versions[len(versions)-1])
+	}
+	return latest, nil
+}
+
 func writeArtifactBlob(t *testing.T, dir, content string) string {
 	t.Helper()
 	sum := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
@@ -468,6 +476,8 @@ func TestOlderTurnForkGetsThatTurnsArtifacts(t *testing.T) {
 	writeTestFile(t, filepath.Join(src, "report.md"), "report v2")
 	writeTestFile(t, filepath.Join(src, "notes", "todo.md"), "created later")
 	writeTestFile(t, filepath.Join(src, "plain.txt"), "never versioned")
+	// Written before the turn and deleted after it: only its saved version is left.
+	gone := writeArtifactBlob(t, src, "deleted later")
 	if err := os.Chtimes(filepath.Join(src, "plain.txt"), before, before); err != nil {
 		t.Fatal(err)
 	}
@@ -477,9 +487,13 @@ func TestOlderTurnForkGetsThatTurnsArtifacts(t *testing.T) {
 	m.store = artifactVersionStore{fakeStore: st, versions: map[string][]domain.SessionArtifactVersion{
 		"report.md":     {{Path: "report.md", Version: 1, SHA256: v1, ModTime: before}, {Path: "report.md", Version: 2, SHA256: v2, ModTime: after}},
 		"notes/todo.md": {{Path: "notes/todo.md", Version: 1, SHA256: todo, ModTime: after}},
+		"old/gone.md":   {{Path: "old/gone.md", Version: 1, SHA256: gone, ModTime: before}},
 	}}
 	dst := t.TempDir()
-	m.copyForkArtifactsAsOf("mer-0", dst, cutoff)
+	m.copyForkArtifactsAsOf(context.Background(), "mer-0", dst, cutoff)
+	if b, _ := os.ReadFile(filepath.Join(dst, "old", "gone.md")); string(b) != "deleted later" {
+		t.Fatalf("old/gone.md = %q, want the artifact as it was at that turn, though deleted since", b)
+	}
 	if b, _ := os.ReadFile(filepath.Join(dst, "report.md")); string(b) != "report v1" {
 		t.Fatalf("report.md = %q, want the version from that turn", b)
 	}
@@ -501,7 +515,7 @@ func TestLatestTurnForkSkipsTheVersionStore(t *testing.T) {
 	writeTestFile(t, filepath.Join(src, "report.md"), "current")
 	writeArtifactBlob(t, src, "current")
 	dst := t.TempDir()
-	m.copyForkArtifacts("mer-0", dst)
+	m.copyForkArtifacts(context.Background(), "mer-0", dst)
 	if b, _ := os.ReadFile(filepath.Join(dst, "report.md")); string(b) != "current" {
 		t.Fatalf("report.md = %q", b)
 	}
@@ -682,5 +696,36 @@ func TestRestoreRecreatedForkGetsItsStartingFilesBack(t *testing.T) {
 	}
 	if len(seeds.restoredBase) != 1 {
 		t.Fatalf("starting files written again into an existing worktree: %v", seeds.restoredBase)
+	}
+}
+
+// A fork of an older turn copies only the attachments its conversation had
+// by then; a fork of the latest turn copies them all.
+func TestForkCopiesOnlyTheAttachmentsItsTurnHad(t *testing.T) {
+	m, _, _, _ := newManager()
+	m.dataDir = t.TempDir()
+	src := filepath.Join(m.dataDir, "attachments", "mer-0")
+	for _, name := range []string{"image-early.png", "image-later.png"} {
+		if err := os.MkdirAll(src, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.copyForkAttachments(context.Background(), &ports.SpawnFork{SourceSessionID: "mer-0", LimitAttachments: true, AttachmentNames: []string{"image-early.png", "../escape"}}, "mer-1")
+	dst := filepath.Join(m.dataDir, "attachments", "mer-1")
+	if _, err := os.Stat(filepath.Join(dst, "image-early.png")); err != nil {
+		t.Fatalf("the turn's attachment wasn't copied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "image-later.png")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an attachment from after the turn was copied: %v", err)
+	}
+
+	m.copyForkAttachments(context.Background(), &ports.SpawnFork{SourceSessionID: "mer-0"}, "mer-2")
+	for _, name := range []string{"image-early.png", "image-later.png"} {
+		if _, err := os.Stat(filepath.Join(m.dataDir, "attachments", "mer-2", name)); err != nil {
+			t.Fatalf("a latest-turn fork is missing %s: %v", name, err)
+		}
 	}
 }

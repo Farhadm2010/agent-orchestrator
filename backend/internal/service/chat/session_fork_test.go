@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -249,5 +250,27 @@ func TestLastAssistantAPIMessageID(t *testing.T) {
 	}
 	if got := lastAssistantAPIMessageID(rows, "t9"); got != "" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// A fork of an older turn takes only the attachments its conversation had by
+// then: the ones named in messages of that turn and the turns before it.
+func TestAttachmentsUpToTurnLeavesOutLaterOnes(t *testing.T) {
+	rows := ConversationRows{
+		Turns: []domain.ConversationTurn{{ID: "t1"}, {ID: "t2"}, {ID: "t3"}},
+		Messages: []domain.ConversationMessage{
+			{TurnID: "t1", Text: "look at .ao/attachments/image-aaa.png please"},
+			{TurnID: "t2", Text: "and this", DeliveryContentJSON: `[{"type":"image","path":".ao/attachments/attachment-bbb.pdf"}]`},
+			{TurnID: "t2", Text: "no attachment here"},
+			{TurnID: "t3", Text: "later: .ao/attachments/image-ccc.png"},
+		},
+	}
+	got := attachmentsUpToTurn(rows, "t2")
+	want := []string{"attachment-bbb.pdf", "image-aaa.png"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("attachments = %v, want %v", got, want)
+	}
+	if got := attachmentsUpToTurn(rows, "t1"); !slices.Equal(got, []string{"image-aaa.png"}) {
+		t.Fatalf("attachments up to t1 = %v", got)
 	}
 }

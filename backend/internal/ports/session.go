@@ -123,6 +123,10 @@ type SpawnFork struct {
 	// ArtifactsAsOf, when set, copies the original's artifacts as they were
 	// at that time: the start of the turn after an older forked turn.
 	ArtifactsAsOf time.Time
+	// LimitAttachments, for a fork of an older turn, copies only the
+	// attachments in AttachmentNames: the ones the conversation had by then.
+	LimitAttachments bool
+	AttachmentNames  []string
 	// SourceWorkspace is the original's worktree. Its dependency folders are
 	// cloned into the fork so setup has less to install.
 	SourceWorkspace string
