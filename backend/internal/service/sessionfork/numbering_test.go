@@ -93,3 +93,43 @@ func TestForksStartedTogetherGetTheirOwnNumbers(t *testing.T) {
 		t.Fatalf("next name = %q, %v", opts.SuggestedName, err)
 	}
 }
+
+type cancellingSpawner struct {
+	fakeSpawner
+	cancel context.CancelFunc
+}
+
+func (c *cancellingSpawner) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
+	rec, a, b, err := c.fakeSpawner.Spawn(ctx, cfg)
+	c.cancel() // the caller goes away just as the session is created
+	return rec, a, b, err
+}
+
+type ctxCheckingLineage struct{ fakeLineage }
+
+func (l *ctxCheckingLineage) RecordSessionFork(ctx context.Context, fork domain.SessionFork) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return l.fakeLineage.RecordSessionFork(ctx, fork)
+}
+
+// A fork whose request is cancelled once its session exists still records
+// where it came from, so retry and cleanup can find its original.
+func TestForkLineageIsRecordedEvenIfTheRequestIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	spawner := &cancellingSpawner{cancel: cancel}
+	lineage := &ctxCheckingLineage{}
+	s := New(Deps{
+		Enabled:  true,
+		Sessions: fakeSessions{source().ID: source()},
+		Projects: fakeProjects{"p": {ID: "p", Kind: domain.ProjectKindSingleRepo}},
+		Lineage:  lineage, Spawner: spawner, Sources: fakeSources{latestTurn: "turn-4"}, Seeds: fakeSeeds{},
+	})
+	if _, err := s.Fork(ctx, "p-1", "req-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(lineage.rows) != 1 {
+		t.Fatalf("lineage rows = %v, want the fork recorded", lineage.rows)
+	}
+}

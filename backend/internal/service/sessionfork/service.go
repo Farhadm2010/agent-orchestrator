@@ -359,7 +359,10 @@ func (s *Service) ForkTurn(ctx context.Context, sourceID domain.SessionID, clien
 		// A retried request returned the first fork; this snapshot is unused.
 		plan.dropSeed(ctx, s.deps.Seeds)
 	} else {
-		if err := s.deps.Lineage.RecordSessionFork(ctx, domain.SessionFork{
+		// The session exists now, so its lineage is written even if the
+		// request is cancelled. Should this write fail, retrying the same
+		// request returns the same session and records it then.
+		if err := s.deps.Lineage.RecordSessionFork(context.WithoutCancel(ctx), domain.SessionFork{
 			ForkSessionID: rec.ID, SourceSessionID: plan.source.ID, RootSessionID: plan.root,
 			SourceTurnID: plan.agent.LatestTurnID, SourceTitle: plan.title, ContextMode: plan.agent.ContextMode,
 			ForkNumber: plan.number, CreatedAt: s.deps.Now().UTC(),
