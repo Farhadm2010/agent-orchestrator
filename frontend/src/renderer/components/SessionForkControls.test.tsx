@@ -12,7 +12,11 @@ const { getMock, postMock, navigateMock } = vi.hoisted(() => ({ getMock: vi.fn()
 
 vi.mock("../lib/host-clients", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../lib/host-clients")>()),
-	clientForSessionHost: () => ({ GET: getMock, POST: postMock }),
+	clientForSessionHost: (hostId?: string) => {
+		// As the real helper does for a remote host that has disconnected.
+		if (hostId === "gone") throw new Error("host gone is not connected");
+		return { GET: getMock, POST: postMock };
+	},
 }));
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@tanstack/react-router")>()),
@@ -233,5 +237,13 @@ describe("session fork controls", () => {
 		rerender(timeline());
 		rerender(timeline());
 		expect(renders).toBe(settled);
+	});
+
+	it("still renders for a session on a remote host that has disconnected", async () => {
+		const offline = { ...session, hostId: "gone" } as WorkspaceSession;
+		renderControls(latestTurnFork(offline));
+		const button = await screen.findByRole("button", { name: "Fork" });
+		await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "true"));
+		expect(getMock).not.toHaveBeenCalled();
 	});
 });

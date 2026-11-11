@@ -28,13 +28,15 @@ export const LatestForkTurnContext = createContext<string | undefined>(undefined
 /** Whether a session can be forked, where it came from, and its forks. */
 export function useSessionForkOptions(session: WorkspaceSession | undefined, enabled = true) {
 	const { t } = useTranslation();
-	const client = clientForSessionHost(session?.hostId);
 	return useQuery({
 		enabled: enabled && Boolean(session),
 		// Status and setup state are in the key: a busy or still-setting-up
 		// session becomes forkable when it goes idle or its worktree is ready.
 		queryKey: ["session-fork-options", session?.hostId ?? "", session?.id ?? "", session?.status, session?.provisionState ?? ""],
 		queryFn: async () => {
+			// Resolved here, not while rendering: a remote host that has
+			// disconnected throws, which becomes this query's error.
+			const client = clientForSessionHost(session?.hostId);
 			const { data, error } = await client.GET("/api/v1/sessions/{sessionId}/fork-options", {
 				params: { path: { sessionId: session?.id ?? "" } },
 			});
@@ -48,7 +50,6 @@ function useSessionFork(session: WorkspaceSession, turnId?: string) {
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
-	const client = clientForSessionHost(session.hostId);
 	// One id per click, so a retried request returns the fork the first made.
 	const requestId = useRef<string | null>(null);
 	// Blocks a second click that lands before the pending state renders.
@@ -57,6 +58,7 @@ function useSessionFork(session: WorkspaceSession, turnId?: string) {
 	const fork = useMutation({
 		mutationFn: async () => {
 			requestId.current ??= crypto.randomUUID();
+			const client = clientForSessionHost(session.hostId);
 			const { data, error } = await client.POST("/api/v1/sessions/{sessionId}/fork", {
 				params: { path: { sessionId: session.id } },
 				body: { clientRequestId: requestId.current, ...(turnId ? { turnId } : {}) },
