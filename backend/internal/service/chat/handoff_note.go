@@ -138,11 +138,21 @@ func (s *Service) HandoffNote(ctx context.Context, record domain.SessionRecord, 
 // ForkHandoffNote builds the note a text-handoff fork's fresh agent starts
 // with: source's conversation as AO recorded it, pointed at the fork's own
 // worktree and artifact folder. terminalOutput is the end of source's
-// terminal screen, for a terminal session.
-func (s *Service) ForkHandoffNote(ctx context.Context, source domain.SessionRecord, target ports.ForkTarget, terminalOutput string) (string, error) {
+// terminal screen, for a terminal session. A non-zero upTo leaves out turns
+// asked after it, so the note stops at the turn the fork copies.
+func (s *Service) ForkHandoffNote(ctx context.Context, source domain.SessionRecord, target ports.ForkTarget, terminalOutput string, upTo time.Time) (string, error) {
 	input, err := s.handoffNoteInput(ctx, source, source.Harness, "")
 	if err != nil {
 		return "", err
+	}
+	if !upTo.IsZero() {
+		kept := input.Turns[:0]
+		for _, turn := range input.Turns {
+			if !turn.At.After(upTo) {
+				kept = append(kept, turn)
+			}
+		}
+		input.Turns = kept
 	}
 	input.Fork = &domain.HandoffFork{SourceSessionID: source.ID, SourceTitle: sessionfork.Title(source)}
 	// The fork's own name, worktree, and branch are in its standing

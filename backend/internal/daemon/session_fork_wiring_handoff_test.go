@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -30,7 +31,7 @@ type recordingForkNotes struct {
 	terminal string
 }
 
-func (r *recordingForkNotes) ForkHandoffNote(_ context.Context, source domain.SessionRecord, target ports.ForkTarget, terminalOutput string) (string, error) {
+func (r *recordingForkNotes) ForkHandoffNote(_ context.Context, source domain.SessionRecord, target ports.ForkTarget, terminalOutput string, _ time.Time) (string, error) {
 	r.source, r.target, r.terminal = source.ID, target.SessionID, terminalOutput
 	return "NOTE", nil
 }

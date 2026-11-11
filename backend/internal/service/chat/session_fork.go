@@ -78,6 +78,9 @@ func (s *Service) SessionForkSource(ctx context.Context, rec domain.SessionRecor
 			return sessionfork.Source{AnyTurn: anyTurn}, nil
 		}
 		plan.nativeAnchor = codexNativeTurnID(latest.ProviderTurnID)
+		if mode == forkIntoWorkspace {
+			plan.cutTurnID, plan.conversationID, plan.reader = latest.ID, conversation.ID, s.reader
+		}
 		return sessionfork.Source{LatestTurnID: latest.ID, ContextMode: contextMode, AnyTurn: anyTurn, PrepareChat: plan.prepare}, nil
 	}
 	if !anyTurn {
@@ -255,9 +258,15 @@ type sessionForkPlan struct {
 	nativeAnchor     string
 	// upToMessage is the provider's id for the last message to keep when a
 	// workspace fork copies an older turn; empty copies everything.
-	upToMessage   string
-	model, effort string
-	permissions   ports.PermissionMode
+	upToMessage string
+	// cutTurnID, for a workspace fork of the latest turn, is the turn to stop
+	// the copy after: the original may start another turn while the fork is
+	// being made. The cut is read only when the fork is made.
+	cutTurnID      string
+	conversationID string
+	reader         SnapshotReader
+	model, effort  string
+	permissions    ports.PermissionMode
 }
 
 // prepare makes the agent's native copy of the conversation for the fork's
@@ -271,7 +280,17 @@ func (p sessionForkPlan) prepare(ctx context.Context, target ports.ForkTarget) (
 		Model: p.model, Effort: p.effort, Permissions: p.permissions,
 	}
 	if forker, ok := p.driver.(ports.ChatWorkspaceForker); ok {
-		return forker.ForkIntoWorkspace(ctx, p.sourceProviderID, p.sourceWorkspace, p.upToMessage, cfg)
+		upTo := p.upToMessage
+		if upTo == "" && p.cutTurnID != "" && p.reader != nil {
+			rows, err := p.reader.LoadConversationSnapshot(ctx, p.conversationID)
+			if err != nil {
+				return "", fmt.Errorf("session fork: load turns: %w", err)
+			}
+			// Without an id for the turn's last reply, the whole session is
+			// copied, as before.
+			upTo = lastAssistantAPIMessageID(rows, p.cutTurnID)
+		}
+		return forker.ForkIntoWorkspace(ctx, p.sourceProviderID, p.sourceWorkspace, upTo, cfg)
 	}
 	forker, ok := p.driver.(ports.ChatIsolatedForker)
 	if !ok {
@@ -331,10 +350,16 @@ func (s *Service) textHandoffForkSource(ctx context.Context, rec domain.SessionR
 		return sessionfork.Source{Refusal: sessionfork.CodeOlderTurn}, nil
 	}
 	source := rec
+	// The note stops at this turn: the original may finish another while the
+	// fork is being made.
+	upTo := latest.RequestedAt
+	if latest.CompletedAt != nil {
+		upTo = *latest.CompletedAt
+	}
 	return sessionfork.Source{
 		LatestTurnID: latest.ID, ContextMode: domain.ForkContextTextHandoff,
 		Handoff: func(ctx context.Context, target ports.ForkTarget) (string, error) {
-			return s.ForkHandoffNote(ctx, source, target, "")
+			return s.ForkHandoffNote(ctx, source, target, "", upTo)
 		},
 	}, nil
 }

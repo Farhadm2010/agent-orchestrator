@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -88,6 +89,20 @@ func TestAnAgentThatCantForkIsForkedWithItsConversationAsText(t *testing.T) {
 	if source.AnyTurn || source.PrepareChat != nil || source.Handoff == nil {
 		t.Fatalf("source = %+v, want latest turn only, no native fork, a handoff", source)
 	}
+	// A turn the original finishes after the fork was planned isn't the fork's.
+	h.advance(time.Minute)
+	later, err := h.ctrl.Send(ctx, ports.ChatUserMessage{Text: "a later question", Origin: domain.MessageOriginHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.conv.emit(
+		ports.ChatEvent{Kind: ports.ChatEventTurnStarted, ProviderTurnID: later.ProviderTurnID},
+		ports.ChatEvent{Kind: ports.ChatEventMessageCompleted, ProviderTurnID: later.ProviderTurnID, ProviderItemID: "later", ProviderEventID: "later", Text: "a later answer"},
+		ports.ChatEvent{Kind: ports.ChatEventTurnCompleted, ProviderTurnID: later.ProviderTurnID, ProviderEventID: "later-done", TurnState: domain.TurnStateCompleted},
+	)
+	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool {
+		return len(s.Turns) == 2 && s.Turns[1].State == domain.TurnStateCompleted
+	})
 	note, err := source.Handoff(ctx, ports.ForkTarget{SessionID: "fork-1", WorkspacePath: "/forks/fork-1"})
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +111,9 @@ func TestAnAgentThatCantForkIsForkedWithItsConversationAsText(t *testing.T) {
 		if !strings.Contains(note, want) {
 			t.Errorf("note is missing %q:\n%s", want, note)
 		}
+	}
+	if strings.Contains(note, "a later question") {
+		t.Errorf("note includes a turn finished after the fork was planned:\n%s", note)
 	}
 
 	older, err := h.svc.SessionForkSource(ctx, rec, "some-earlier-turn")

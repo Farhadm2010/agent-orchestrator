@@ -274,3 +274,24 @@ func TestAttachmentsUpToTurnLeavesOutLaterOnes(t *testing.T) {
 		t.Fatalf("attachments up to t1 = %v", got)
 	}
 }
+
+// A Claude fork of the latest turn copies the session only up to that turn,
+// so a turn the original starts while the fork is being made stays out.
+func TestClaudeLatestTurnForkStopsAtThatTurn(t *testing.T) {
+	driver := &workspaceForkDriver{}
+	rows := ConversationRows{Messages: []domain.ConversationMessage{
+		{TurnID: "t2", Role: domain.MessageRoleAssistant, ProviderItemID: "msg_LATEST"},
+		{TurnID: "t3", Role: domain.MessageRoleAssistant, ProviderItemID: "msg_NEWER"},
+	}}
+	plan := sessionForkPlan{
+		driver: driver, sourceProviderID: "s", sourceWorkspace: "/w/src",
+		cutTurnID: "t2", conversationID: "c",
+		reader: SnapshotReaderFunc(func(context.Context, string) (ConversationRows, error) { return rows, nil }),
+	}
+	if _, err := plan.prepare(context.Background(), ports.ForkTarget{SessionID: "f", WorkspacePath: "/w/fork"}); err != nil {
+		t.Fatal(err)
+	}
+	if driver.gotUpTo != "msg_LATEST" {
+		t.Fatalf("copy cut at %q, want the forked turn's last reply", driver.gotUpTo)
+	}
+}

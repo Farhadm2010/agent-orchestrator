@@ -39,7 +39,7 @@ type terminalForkSources interface {
 // forkHandoffNotes builds the text copy of a conversation a text-handoff
 // fork starts with.
 type forkHandoffNotes interface {
-	ForkHandoffNote(ctx context.Context, source domain.SessionRecord, target ports.ForkTarget, terminalOutput string) (string, error)
+	ForkHandoffNote(ctx context.Context, source domain.SessionRecord, target ports.ForkTarget, terminalOutput string, upTo time.Time) (string, error)
 }
 
 // forkSources routes a fork to the Chat service or the terminal manager.
@@ -68,7 +68,7 @@ func (f forkSources) ForkSource(ctx context.Context, rec domain.SessionRecord, t
 		return sessionfork.Source{
 			ContextMode: domain.ForkContextTextHandoff,
 			Handoff: func(ctx context.Context, target ports.ForkTarget) (string, error) {
-				return f.notes.ForkHandoffNote(ctx, original, target, f.terminal.ForkTerminalOutput(ctx, original))
+				return f.notes.ForkHandoffNote(ctx, original, target, f.terminal.ForkTerminalOutput(ctx, original), time.Time{})
 			},
 		}, nil
 	}
