@@ -300,3 +300,26 @@ func TestRestoreBaseLeavesAForkThatMovedOn(t *testing.T) {
 		t.Fatalf("no base recorded: applied=%v err=%v", applied, err)
 	}
 }
+
+// A recreated worktree that already got the fork's own edits back, from the
+// copy archiving preserved, keeps them: the starting files would overwrite
+// them.
+func TestRestoreBaseLeavesReplayedEditsAlone(t *testing.T) {
+	src := sourceRepo(t)
+	ctx := context.Background()
+	ref := BaseRef("fork-1")
+	if err := RecordBase(ctx, src, ref); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(t.TempDir(), "restored")
+	git(t, src, "worktree", "add", "-q", "--detach", restored, "HEAD")
+	write(t, filepath.Join(restored, "a.txt"), "the fork's own edit\n")
+
+	applied, err := RestoreBase(ctx, restored, ref)
+	if err != nil || applied {
+		t.Fatalf("applied=%v err=%v; replayed edits must be left alone", applied, err)
+	}
+	if got := read(t, filepath.Join(restored, "a.txt")); got != "the fork's own edit\n" {
+		t.Fatalf("a.txt = %q", got)
+	}
+}

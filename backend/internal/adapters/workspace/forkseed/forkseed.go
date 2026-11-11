@@ -117,7 +117,9 @@ func UnchangedSince(ctx context.Context, worktree, ref string) (bool, error) {
 // its worktree, uncommitted, when the worktree was recreated and lost them.
 // It does so only while the worktree is still at the commit the fork started
 // on: a fork that committed since has its own history, which the starting
-// files would undo. applied is false when nothing was written.
+// files would undo. A worktree that already has changes, such as the fork's
+// own edits replayed by restore, is left alone. applied is false when nothing
+// was written.
 func RestoreBase(ctx context.Context, worktree, ref string) (applied bool, err error) {
 	if !strings.HasPrefix(ref, BasePrefix) {
 		return false, fmt.Errorf("forkseed: ref %q is outside %s", ref, BasePrefix)
@@ -131,6 +133,15 @@ func RestoreBase(ctx context.Context, worktree, ref string) (applied bool, err e
 		return false, fmt.Errorf("forkseed: read HEAD: %w", err)
 	}
 	if head != start {
+		return false, nil
+	}
+	// Restore may already have put the fork's own edits back, from the copy
+	// archiving preserved; the starting files would overwrite them.
+	status, err := run(ctx, worktree, nil, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return false, fmt.Errorf("forkseed: read status: %w", err)
+	}
+	if status != "" {
 		return false, nil
 	}
 	if err := Apply(ctx, worktree, ref); err != nil {
