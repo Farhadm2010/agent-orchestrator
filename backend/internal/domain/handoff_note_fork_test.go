@@ -3,6 +3,7 @@ package domain
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestBuildHandoffNoteForAForkNamesTheOriginalAndItsHistory(t *testing.T) {
@@ -77,5 +78,27 @@ func TestBuildHandoffNoteCarriesAnInheritedConversation(t *testing.T) {
 	}
 	if strings.Contains(got[section:], "\n## Latest turn\nUser:\nremember") {
 		t.Errorf("the inherited note's headings must not add sections")
+	}
+}
+
+// When the earlier conversation a fork inherited doesn't fit beside the
+// latest turn, it is the inherited text that is cut, not the latest turn.
+func TestForkNoteKeepsTheLatestTurnOverInheritedText(t *testing.T) {
+	saved := handoffNoteMaxChars
+	handoffNoteMaxChars = handoffNoteCharLimit("windows")
+	t.Cleanup(func() { handoffNoteMaxChars = saved })
+	note := BuildHandoffNote(HandoffNoteInput{
+		SourceHarness: HarnessCodex, TargetHarness: HarnessCodex,
+		Fork:      &HandoffFork{SourceSessionID: "p-1"},
+		Turns:     []HandoffTurn{{UserRequest: "LATEST-ASK", AgentResponse: "LATEST-START " + strings.Repeat("x", 9_000) + " LATEST-END"}},
+		Inherited: "INHERITED-START " + strings.Repeat("y", 23_000) + " INHERITED-END",
+	})
+	if got := utf8.RuneCountInString(note); got > handoffNoteMaxChars {
+		t.Fatalf("note is %d characters, want at most %d", got, handoffNoteMaxChars)
+	}
+	for _, want := range []string{"LATEST-ASK", "LATEST-START", "LATEST-END", "INHERITED-START", "</ao-handoff-request>"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note is missing %q", want)
+		}
 	}
 }

@@ -33,6 +33,8 @@ const (
 	handoffHistoryPathCap   = 400
 	handoffTerminalCap      = 8_000
 	handoffInheritedCap     = 24_000
+	// handoffInheritedMin is the shortest inherited section worth keeping.
+	handoffInheritedMin = 500
 
 	// A note delivered as a launch argument must also fit the operating
 	// system's per-argument limit, which is counted in bytes.
@@ -132,15 +134,28 @@ func BuildHandoffNote(in HandoffNoteInput) string {
 	older := in.Turns[max(0, len(in.Turns)-len(recent)-handoffOlderTurnLimit) : len(in.Turns)-len(recent)]
 
 	artifacts := min(len(in.Artifacts), handoffArtifactLimit)
+	inherited := strings.TrimSpace(in.Inherited)
+	inheritedCap := handoffInheritedCap
+	if inherited == "" {
+		inheritedCap = 0
+	}
 
-	// Drop material until the whole note fits: older turns, then the last
-	// listed artifacts, then previous turns. The latest turn is never dropped.
+	// Drop material until the whole note fits: the conversation inherited
+	// from before the session, being the oldest, then older turns, the last
+	// listed artifacts, and previous turns. The latest turn is never dropped.
 	for {
-		note := renderHandoffNote(in, older, recent, artifacts)
+		note := renderHandoffNote(in, older, recent, artifacts, inheritedCap)
 		if handoffNoteFits(note) {
 			return note
 		}
 		switch {
+		case inheritedCap > 0:
+			// Shorten it by what the note is over; a rune is at most four bytes.
+			over := max(utf8.RuneCountInString(note)-handoffNoteMaxChars, (len(note)-handoffNoteMaxBytes+3)/4, 1)
+			inheritedCap = utf8.RuneCountInString(quoteHandoffText(inherited, inheritedCap, handoffClipMarker)) - over
+			if inheritedCap < handoffInheritedMin {
+				inheritedCap = 0
+			}
 		case len(older) > 0:
 			older = older[1:]
 		case artifacts > 0:
@@ -170,9 +185,10 @@ func clipHandoffNote(note string) string {
 	}
 }
 
-// renderHandoffNote renders the note with the given turns and the first
-// artifacts entries of in.Artifacts.
-func renderHandoffNote(in HandoffNoteInput, older, recent []HandoffTurn, artifacts int) string {
+// renderHandoffNote renders the note with the given turns, the first
+// artifacts entries of in.Artifacts, and in.Inherited clipped to
+// inheritedCap, or left out at zero.
+func renderHandoffNote(in HandoffNoteInput, older, recent []HandoffTurn, artifacts, inheritedCap int) string {
 	var b strings.Builder
 	if in.SwitchID != "" {
 		fmt.Fprintf(&b, "%s switch-id=%q>\n", HandoffNotePrefix, in.SwitchID)
@@ -256,9 +272,9 @@ func renderHandoffNote(in HandoffNoteInput, older, recent []HandoffTurn, artifac
 		fmt.Fprintf(&b, "\n## Latest turn\nUser:\n%s\n%s:\n%s\n", user, handoffAssistantLabel(latest), agent)
 	}
 
-	if inherited := strings.TrimSpace(in.Inherited); inherited != "" {
+	if inherited := strings.TrimSpace(in.Inherited); inherited != "" && inheritedCap > 0 {
 		b.WriteString("\n## Conversation before that session\nThat session was itself started from an earlier conversation, given to it as text. It is part of the same history:\n")
-		b.WriteString(quoteHandoffText(inherited, handoffInheritedCap, handoffClipMarker))
+		b.WriteString(quoteHandoffText(inherited, inheritedCap, handoffClipMarker))
 		b.WriteByte('\n')
 	}
 
