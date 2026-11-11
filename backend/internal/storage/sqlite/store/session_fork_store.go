@@ -126,8 +126,10 @@ var replayPlaceholder = regexp.MustCompile(`\[(?:Image|Audio|Embedded context|Fi
 func (s *Store) CopyForkMessageContent(ctx context.Context, sourceConversationID, forkConversationID string) (int, error) {
 	type userMessage struct{ id, text, content string }
 	load := func(conversationID string) ([]userMessage, error) {
-		rows, err := s.readDB.QueryContext(ctx, `SELECT id, text, COALESCE(delivery_content_json, '') FROM conversation_messages
-			WHERE conversation_id = ? AND role = 'user' ORDER BY sequence`, conversationID)
+		// A rolled-back turn's messages aren't in the history a fork copies.
+		rows, err := s.readDB.QueryContext(ctx, `SELECT m.id, m.text, COALESCE(m.delivery_content_json, '') FROM conversation_messages m
+			LEFT JOIN conversation_turns t ON t.id = m.turn_id
+			WHERE m.conversation_id = ? AND m.role = 'user' AND t.rolled_back_at IS NULL ORDER BY m.sequence`, conversationID)
 		if err != nil {
 			return nil, err
 		}
