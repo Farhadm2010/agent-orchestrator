@@ -47,10 +47,19 @@ func TestClaudeForkScriptMovesFile(t *testing.T) {
 			}
 		}
 		// The SDK writes the child beside the source, keeping the source cwd.
-		lines := `{"type":"user","sessionId":"child-id","cwd":"` + src + `","uuid":"a"}` + "\n" +
-			`{"type":"assistant","sessionId":"child-id","cwd":"` + src + `/sub","uuid":"b"}` + "\n" +
-			`{"type":"custom-title","sessionId":"child-id"}` + "\n"
-		return "child-id", os.WriteFile(filepath.Join(filepath.Dir(source), "child-id.jsonl"), []byte(lines), 0o600)
+		var lines []byte
+		for _, record := range []map[string]string{
+			{"type": "user", "sessionId": "child-id", "cwd": src, "uuid": "a"},
+			{"type": "assistant", "sessionId": "child-id", "cwd": filepath.Join(src, "sub"), "uuid": "b"},
+			{"type": "custom-title", "sessionId": "child-id"},
+		} {
+			line, err := json.Marshal(record)
+			if err != nil {
+				return "", err
+			}
+			lines = append(append(lines, line...), '\n')
+		}
+		return "child-id", os.WriteFile(filepath.Join(filepath.Dir(source), "child-id.jsonl"), lines, 0o600)
 	}
 	defer func() { runForkScript = restore }()
 
@@ -79,7 +88,7 @@ func TestClaudeForkScriptMovesFile(t *testing.T) {
 		}
 		cwds = append(cwds, rec.Cwd)
 	}
-	if cwds[0] != dst || cwds[1] != dst+"/sub" || cwds[2] != "" {
+	if cwds[0] != dst || cwds[1] != filepath.Join(dst, "sub") || cwds[2] != "" {
 		t.Fatalf("cwds = %v", cwds)
 	}
 	if b, _ := os.ReadFile(source); string(b) != "{}\n" {
@@ -160,11 +169,11 @@ func TestResolveForkPointUsesLastLineInSourceFile(t *testing.T) {
 	if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := resolveForkPoint(file, "msg_A")
+	got, err := resolveForkPoint(context.Background(), file, "msg_A")
 	if err != nil || got != "a2" {
 		t.Fatalf("fork point = %q, %v; want a2", got, err)
 	}
-	if _, err := resolveForkPoint(file, "msg_missing"); err == nil {
+	if _, err := resolveForkPoint(context.Background(), file, "msg_missing"); err == nil {
 		t.Fatal("an unknown message must not fork the whole session")
 	}
 }

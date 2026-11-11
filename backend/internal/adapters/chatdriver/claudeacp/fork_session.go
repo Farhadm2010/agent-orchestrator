@@ -50,7 +50,7 @@ func (d *checkpointDriver) ForkIntoWorkspace(ctx context.Context, sourceID, sour
 	cut := ""
 	if upToMessageID != "" {
 		sourceFile := filepath.Join(configDir, "projects", claudeProjectKey(src), sourceID+".jsonl")
-		if cut, err = resolveForkPoint(sourceFile, upToMessageID); err != nil {
+		if cut, err = resolveForkPoint(ctx, sourceFile, upToMessageID); err != nil {
 			return "", fmt.Errorf("claude fork: %w", err)
 		}
 	}
@@ -65,7 +65,7 @@ func (d *checkpointDriver) ForkIntoWorkspace(ctx context.Context, sourceID, sour
 	}
 	from := filepath.Join(configDir, "projects", claudeProjectKey(src), childID+".jsonl")
 	to := filepath.Join(configDir, "projects", claudeProjectKey(dst), childID+".jsonl")
-	if err := moveSessionFile(from, to, src, dst); err != nil {
+	if err := moveSessionFile(ctx, from, to, src, dst); err != nil {
 		_ = os.Remove(from)
 		return "", fmt.Errorf("claude fork: move session: %w", err)
 	}
@@ -104,7 +104,7 @@ var nonAlphanumeric = regexp.MustCompile(`[^A-Za-z0-9]`)
 // resolveForkPoint finds the session-file line to cut a fork after: the last
 // line of the API message apiMessageID, since one message is written as
 // several lines while it streams. It reads the source session's own file.
-func resolveForkPoint(sessionFile, apiMessageID string) (string, error) {
+func resolveForkPoint(ctx context.Context, sessionFile, apiMessageID string) (string, error) {
 	file, err := os.Open(sessionFile)
 	if err != nil {
 		return "", err
@@ -114,6 +114,9 @@ func resolveForkPoint(sessionFile, apiMessageID string) (string, error) {
 	scanner.Buffer(make([]byte, 0, 1<<20), 256<<20)
 	last := ""
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		var line struct {
 			UUID    string `json:"uuid"`
 			Message struct {
@@ -139,7 +142,7 @@ func claudeProjectKey(realPath string) string {
 }
 
 // moveSessionFile rewrites every cwd under src to dst while moving the file.
-func moveSessionFile(from, to, src, dst string) error {
+func moveSessionFile(ctx context.Context, from, to, src, dst string) error {
 	in, err := os.Open(from)
 	if err != nil {
 		return err
@@ -157,6 +160,10 @@ func moveSessionFile(from, to, src, dst string) error {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 1<<20), 256<<20)
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			tmp.Close()
+			return err
+		}
 		line := rewriteCwd(scanner.Bytes(), src, dst)
 		if _, err := out.Write(append(line, '\n')); err != nil {
 			tmp.Close()
