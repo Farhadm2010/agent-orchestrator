@@ -253,7 +253,9 @@ func setupRoute(req *http.Request) bool {
 	switch chi.RouteContext(req.Context()).RoutePattern() {
 	case "/api/v1/sessions", "/api/v1/orchestrators", "/api/v1/sessions/{sessionId}/restore",
 		// The first open of an imported chat runs Setup in its new workspace.
-		"/api/v1/sessions/{sessionId}/resume-agent":
+		"/api/v1/sessions/{sessionId}/resume-agent",
+		// A fork spawns a session, whose Setup runs in its new worktree.
+		"/api/v1/sessions/{sessionId}/fork":
 		return true
 	}
 	return false

@@ -23,6 +23,9 @@ import (
 // before the cleanup pass treats it as a crash leftover.
 const forkSeedMaxAge = time.Hour
 
+// prMovedNoticeBudget bounds telling a session that one of its PRs moved.
+const prMovedNoticeBudget = 2 * time.Minute
+
 // turnArtifactSnapshotBudget bounds keeping a session's artifacts as a turn
 // starts; a turn never waits longer for it.
 const turnArtifactSnapshotBudget = 3 * time.Second
@@ -139,6 +142,10 @@ func wireSessionFork(store *sqlite.Store, sessionSvc *sessionsvc.Service, mgr se
 		// Told in the background: waking an agent can take a while, and the
 		// claim that moved the PR must not wait for it.
 		go func() {
+			// Bounded, so an agent that never answers can't hold its chat's
+			// send lock; long enough to start an agent that isn't running.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prMovedNoticeBudget)
+			defer cancel()
 			title := string(to)
 			if rec, found, err := store.GetSession(ctx, to); err == nil && found {
 				title = sessionfork.Title(rec)
