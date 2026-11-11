@@ -73,9 +73,29 @@ func TestTerminalForkKeepsRefusalsTextCantFix(t *testing.T) {
 	}
 }
 
-// A session whose chat agent isn't running still learns its PR moved: its
-// agent is started, as opening the session would, and then told.
-func TestPRMovedNoticeStartsAChatAgentThatIsntRunning(t *testing.T) {
+// A hibernated Chat session gets the notice queued for when its agent wakes,
+// rather than being woken for it.
+func TestPRMovedNoticeIsQueuedForAHibernatedChat(t *testing.T) {
+	var queued string
+	send := func(context.Context, domain.SessionID, string) error {
+		return fmt.Errorf("send x: %w", chatsvc.ErrNoController)
+	}
+	queue := func(_ context.Context, _ domain.SessionID, text string) error { queued = text; return nil }
+	resume := func(context.Context, domain.SessionID) error {
+		t.Fatal("a hibernated chat must not be woken")
+		return nil
+	}
+	if err := tellPRMoved(context.Background(), send, queue, resume, "fork-1", "PR #1 moved"); err != nil {
+		t.Fatal(err)
+	}
+	if queued != "PR #1 moved" {
+		t.Fatalf("queued = %q, want the notice", queued)
+	}
+}
+
+// A Chat session whose agent never started has nowhere to queue the notice,
+// so its agent is started, as opening the session would, and told.
+func TestPRMovedNoticeStartsAChatAgentThatNeverStarted(t *testing.T) {
 	var started bool
 	var sent string
 	send := func(_ context.Context, _ domain.SessionID, text string) error {
@@ -85,8 +105,9 @@ func TestPRMovedNoticeStartsAChatAgentThatIsntRunning(t *testing.T) {
 		sent = text
 		return nil
 	}
+	queue := func(context.Context, domain.SessionID, string) error { return chatsvc.ErrNotProvisioning }
 	resume := func(context.Context, domain.SessionID) error { started = true; return nil }
-	if err := tellPRMoved(context.Background(), send, resume, "fork-1", "PR #1 moved"); err != nil {
+	if err := tellPRMoved(context.Background(), send, queue, resume, "fork-1", "PR #1 moved"); err != nil {
 		t.Fatal(err)
 	}
 	if !started || sent != "PR #1 moved" {
@@ -97,11 +118,12 @@ func TestPRMovedNoticeStartsAChatAgentThatIsntRunning(t *testing.T) {
 func TestPRMovedNoticeIsSentToARunningAgent(t *testing.T) {
 	var sent string
 	send := func(_ context.Context, _ domain.SessionID, text string) error { sent = text; return nil }
+	queue := func(context.Context, domain.SessionID, string) error { t.Fatal("must not queue"); return nil }
 	resume := func(context.Context, domain.SessionID) error {
 		t.Fatal("a running agent must not be restarted")
 		return nil
 	}
-	if err := tellPRMoved(context.Background(), send, resume, "fork-1", "PR #1 moved"); err != nil || sent != "PR #1 moved" {
+	if err := tellPRMoved(context.Background(), send, queue, resume, "fork-1", "PR #1 moved"); err != nil || sent != "PR #1 moved" {
 		t.Fatalf("sent = %q, %v", sent, err)
 	}
 }

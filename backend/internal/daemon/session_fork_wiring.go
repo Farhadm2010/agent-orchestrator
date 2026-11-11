@@ -136,28 +136,40 @@ func wireSessionFork(store *sqlite.Store, sessionSvc *sessionsvc.Service, mgr se
 		wired.SetForkRetrier(svc.RetrySpawnFork)
 	}
 	sessionSvc.SetPRMovedNotifier(func(ctx context.Context, from, to domain.SessionID, pr domain.PullRequest) {
-		title := string(to)
-		if rec, found, err := store.GetSession(ctx, to); err == nil && found {
-			title = sessionfork.Title(rec)
-		}
-		message := fmt.Sprintf("PR #%d moved to %s (%s). It now belongs to that session: don't push to it or act on its CI or reviews from here.", pr.Number, title, to)
-		resume := func(ctx context.Context, id domain.SessionID) error {
-			_, err := sessionSvc.ResumeAgent(ctx, id)
-			return err
-		}
-		if err := tellPRMoved(ctx, messenger.Send, resume, from, message); err != nil {
-			log.Warn("session fork: tell session its PR moved", "session", from, "pr", pr.URL, "err", err)
-		}
+		// Told in the background: waking an agent can take a while, and the
+		// claim that moved the PR must not wait for it.
+		go func() {
+			title := string(to)
+			if rec, found, err := store.GetSession(ctx, to); err == nil && found {
+				title = sessionfork.Title(rec)
+			}
+			message := fmt.Sprintf("PR #%d moved to %s (%s). It now belongs to that session: don't push to it or act on its CI or reviews from here.", pr.Number, title, to)
+			queue := func(ctx context.Context, id domain.SessionID, text string) error {
+				_, err := chat.QueueUserMessage(ctx, id, ports.ChatUserMessage{Text: text, Origin: domain.MessageOriginAutomation})
+				return err
+			}
+			resume := func(ctx context.Context, id domain.SessionID) error {
+				_, err := sessionSvc.ResumeAgent(ctx, id)
+				return err
+			}
+			if err := tellPRMoved(ctx, messenger.Send, queue, resume, from, message); err != nil {
+				log.Warn("session fork: tell session its PR moved", "session", from, "pr", pr.URL, "err", err)
+			}
+		}()
 	})
 	return svc
 }
 
 // tellPRMoved tells a session that one of its PRs moved. A Chat session whose
-// agent isn't running is started first, as opening it would, so the notice
-// isn't lost.
-func tellPRMoved(ctx context.Context, send func(context.Context, domain.SessionID, string) error, resume func(context.Context, domain.SessionID) error, id domain.SessionID, message string) error {
+// agent isn't running gets the notice queued for when it wakes; only one
+// whose agent never started, which has no queue, is started to be told.
+func tellPRMoved(ctx context.Context, send func(context.Context, domain.SessionID, string) error, queue func(context.Context, domain.SessionID, string) error, resume func(context.Context, domain.SessionID) error, id domain.SessionID, message string) error {
 	err := send(ctx, id, message)
 	if !errors.Is(err, chatsvc.ErrNoController) {
+		return err
+	}
+	err = queue(ctx, id, message)
+	if !errors.Is(err, chatsvc.ErrNotProvisioning) {
 		return err
 	}
 	if err := resume(ctx, id); err != nil {
