@@ -128,3 +128,46 @@ func TestPRMovedNoticeIsSentToARunningAgent(t *testing.T) {
 		t.Fatalf("sent = %q, %v", sent, err)
 	}
 }
+
+type changingTerminal struct{ screen *string }
+
+func (c changingTerminal) TerminalForkSource(context.Context, domain.SessionRecord, string) (sessionfork.Source, error) {
+	return sessionfork.Source{Refusal: sessionfork.CodeAgentUnsupported}, nil
+}
+func (c changingTerminal) ForkTerminalOutput(context.Context, domain.SessionRecord) string {
+	return *c.screen
+}
+
+type cutoffNotes struct {
+	screen string
+	upTo   time.Time
+}
+
+func (n *cutoffNotes) ForkHandoffNote(_ context.Context, _ domain.SessionRecord, _ ports.ForkTarget, terminalOutput string, upTo time.Time) (string, error) {
+	n.screen, n.upTo = terminalOutput, upTo
+	return "NOTE", nil
+}
+
+// A terminal fork's note is the screen and turns as they were when its files
+// were captured, not whatever the original did while the fork was set up.
+func TestTerminalTextForkUsesTheScreenFromWhenItsFilesWereCaptured(t *testing.T) {
+	screen := "$ before the fork"
+	notes := &cutoffNotes{}
+	sources := forkSources{terminal: changingTerminal{screen: &screen}, notes: notes}
+	source, err := sources.ForkSource(context.Background(), domain.SessionRecord{ID: "copilot-1", Mode: domain.SessionModeTUI}, "")
+	if err != nil || source.Freeze == nil {
+		t.Fatalf("source = %+v, %v; want a freeze hook", source, err)
+	}
+	before := time.Now()
+	source.Freeze(context.Background())
+	screen = "$ a later command"
+	if _, err := source.Handoff(context.Background(), ports.ForkTarget{SessionID: "fork-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if notes.screen != "$ before the fork" {
+		t.Fatalf("screen = %q, want the one from when the files were captured", notes.screen)
+	}
+	if notes.upTo.Before(before) || notes.upTo.After(time.Now()) {
+		t.Fatalf("turns cut off at %v, want when the files were captured", notes.upTo)
+	}
+}

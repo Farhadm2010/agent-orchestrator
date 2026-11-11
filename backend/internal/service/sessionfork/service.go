@@ -95,6 +95,10 @@ type Source struct {
 	// Handoff builds the text copy of the conversation a text-handoff fork's
 	// fresh agent starts with.
 	Handoff func(ctx context.Context, target ports.ForkTarget) (string, error)
+	// Freeze, when set, is called just before a fork captures the source's
+	// files, so what Handoff copies later matches them. Checking whether a
+	// session can be forked doesn't call it.
+	Freeze func(ctx context.Context)
 }
 
 // Sessions reads session records.
@@ -495,6 +499,9 @@ func (s *Service) plan(ctx context.Context, sourceID domain.SessionID, turnID st
 			return forkPlan{}, refuse(CodeNotGit)
 		}
 		return plan, nil
+	}
+	if agent.Freeze != nil {
+		agent.Freeze(ctx)
 	}
 	if agent.FilesSnapshotRef != "" {
 		// An older turn: its files are the snapshot taken before the turn

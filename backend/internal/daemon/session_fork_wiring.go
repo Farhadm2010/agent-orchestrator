@@ -63,12 +63,26 @@ func (f forkSources) ForkSource(ctx context.Context, rec domain.SessionRecord, t
 	switch source.Refusal {
 	case sessionfork.CodeAgentUnsupported, sessionfork.CodeNativeMissing:
 		// The agent can't copy its own conversation: a fresh agent gets AO's
-		// record of it and the end of the terminal screen, as text.
+		// record of it and the end of the terminal screen, as text. Both are
+		// taken when the fork captures the files, so they match them even if
+		// the original moves on while the fork is set up.
 		original := rec
+		var (
+			frozen bool
+			screen string
+			upTo   time.Time
+		)
 		return sessionfork.Source{
 			ContextMode: domain.ForkContextTextHandoff,
+			Freeze: func(ctx context.Context) {
+				frozen, screen, upTo = true, f.terminal.ForkTerminalOutput(ctx, original), time.Now()
+			},
 			Handoff: func(ctx context.Context, target ports.ForkTarget) (string, error) {
-				return f.notes.ForkHandoffNote(ctx, original, target, f.terminal.ForkTerminalOutput(ctx, original), time.Time{})
+				if !frozen {
+					// A retried fork that was planned without capturing.
+					screen, upTo = f.terminal.ForkTerminalOutput(ctx, original), time.Now()
+				}
+				return f.notes.ForkHandoffNote(ctx, original, target, screen, upTo)
 			},
 		}, nil
 	}

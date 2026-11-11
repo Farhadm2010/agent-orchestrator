@@ -133,3 +133,28 @@ func TestForkLineageIsRecordedEvenIfTheRequestIsCancelled(t *testing.T) {
 		t.Fatalf("lineage rows = %v, want the fork recorded", lineage.rows)
 	}
 }
+
+type freezingSources struct{ froze *int }
+
+func (f freezingSources) ForkSource(context.Context, domain.SessionRecord, string) (Source, error) {
+	return Source{LatestTurnID: "turn-4", ContextMode: domain.ForkContextTextHandoff, Freeze: func(context.Context) { *f.froze++ }}, nil
+}
+
+// A source fixes its conversation where the fork's files are captured, so
+// the two match; checking whether it can fork doesn't capture anything.
+func TestForkFreezesTheSourceOnlyWhenForking(t *testing.T) {
+	froze := 0
+	s, _, _ := newService(source(), func(s *Service) { s.deps.Sources = freezingSources{froze: &froze} })
+	if _, err := s.Options(context.Background(), "p-1"); err != nil {
+		t.Fatal(err)
+	}
+	if froze != 0 {
+		t.Fatalf("options froze the source %d times", froze)
+	}
+	if _, err := s.Fork(context.Background(), "p-1", "req-1"); err != nil {
+		t.Fatal(err)
+	}
+	if froze != 1 {
+		t.Fatalf("fork froze the source %d times, want once", froze)
+	}
+}
