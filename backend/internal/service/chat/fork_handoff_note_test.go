@@ -124,3 +124,28 @@ func TestAnAgentThatCantForkIsForkedWithItsConversationAsText(t *testing.T) {
 		t.Fatalf("older turn refusal = %q, want %q", older.Refusal, sessionfork.CodeOlderTurn)
 	}
 }
+
+// Forking a fork that was given its conversation as text passes that
+// conversation on: it lives in the fork's saved note, not its own turns.
+func TestForkOfATextForkKeepsTheEarlierConversation(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	conversation, err := h.st.ConversationForSession(ctx, testSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.SetConversationBranchHandoffNote(ctx, conversation.ID, conversation.ActiveBranchID, "INHERITED: the code word is heron"); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := h.st.GetSession(ctx, testSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, err := h.svc.ForkHandoffNote(ctx, rec, ports.ForkTarget{SessionID: "fork-2", WorkspacePath: "/forks/fork-2"}, "", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "INHERITED: the code word is heron") {
+		t.Fatalf("note lost the inherited conversation:\n%s", note)
+	}
+}

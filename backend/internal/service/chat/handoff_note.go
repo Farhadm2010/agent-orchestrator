@@ -163,6 +163,13 @@ func (s *Service) ForkHandoffNote(ctx context.Context, source domain.SessionReco
 		input.ArtifactDir = filepath.ToSlash(sessionartifacts.Dir(s.dataDir, target.SessionID))
 	}
 	input.TerminalOutput = terminalOutput
+	// A source that was itself a text-copy fork keeps its conversation from
+	// before it in its saved note, not in its own turns.
+	if conversation, err := s.store.ConversationForSession(ctx, source.ID); err == nil {
+		if branch, err := s.store.ConversationBranch(ctx, conversation.ID, conversation.ActiveBranchID); err == nil {
+			input.Inherited = branch.HandoffNote
+		}
+	}
 	// The fork starts with the same uncommitted changes.
 	input.ChangedFiles = handoffChangedFiles(ctx, source.Metadata.WorkspacePath, source.Metadata.DiffBaseSHA)
 	return domain.BuildHandoffNote(input), nil

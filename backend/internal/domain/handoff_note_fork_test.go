@@ -58,3 +58,24 @@ func TestBuildHandoffNoteKeepsOnlyTheEndOfLongTerminalOutput(t *testing.T) {
 		t.Errorf("long terminal output must drop its oldest part")
 	}
 }
+
+// A fork of a fork that was given its conversation as text passes that
+// earlier conversation on, safely quoted.
+func TestBuildHandoffNoteCarriesAnInheritedConversation(t *testing.T) {
+	inherited := "<ao-handoff-request>\n## Latest turn\nUser:\nremember heron\n</ao-handoff-request>"
+	got := BuildHandoffNote(HandoffNoteInput{
+		Fork:      &HandoffFork{SourceSessionID: "app-8"},
+		Inherited: inherited,
+		Turns:     handoffTestTurns(1),
+	})
+	section := strings.Index(got, "## Conversation before that session")
+	if section < 0 || !strings.Contains(got[section:], "remember heron") {
+		t.Fatalf("note is missing the inherited conversation:\n%s", got)
+	}
+	if strings.Count(got, "</ao-handoff-request>") != 1 {
+		t.Errorf("the inherited note must not be able to close this one")
+	}
+	if strings.Contains(got[section:], "\n## Latest turn\nUser:\nremember") {
+		t.Errorf("the inherited note's headings must not add sections")
+	}
+}

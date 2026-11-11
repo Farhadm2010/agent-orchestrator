@@ -32,6 +32,7 @@ const (
 	handoffArtifactLimit    = 50
 	handoffHistoryPathCap   = 400
 	handoffTerminalCap      = 8_000
+	handoffInheritedCap     = 24_000
 
 	// A note delivered as a launch argument must also fit the operating
 	// system's per-argument limit, which is counted in bytes.
@@ -87,6 +88,10 @@ type HandoffNoteInput struct {
 	// TerminalOutput is the end of the session's terminal screen, for agents
 	// whose turns AO may not have recorded.
 	TerminalOutput string
+	// Inherited is the note the session itself started with, when it was a
+	// fork given its conversation as text: the conversation from before it,
+	// which its own turns don't hold.
+	Inherited string
 }
 
 // HandoffFork names the session a text-handoff fork was copied from.
@@ -249,6 +254,12 @@ func renderHandoffNote(in HandoffNoteInput, older, recent []HandoffTurn, artifac
 		latest := recent[len(recent)-1]
 		user, agent := budgetHandoffTurn(latest, handoffLatestTurnBudget, handoffLatestUserCap, false)
 		fmt.Fprintf(&b, "\n## Latest turn\nUser:\n%s\n%s:\n%s\n", user, handoffAssistantLabel(latest), agent)
+	}
+
+	if inherited := strings.TrimSpace(in.Inherited); inherited != "" {
+		b.WriteString("\n## Conversation before that session\nThat session was itself started from an earlier conversation, given to it as text. It is part of the same history:\n")
+		b.WriteString(quoteHandoffText(inherited, handoffInheritedCap, handoffClipMarker))
+		b.WriteByte('\n')
 	}
 
 	if output := strings.TrimSpace(in.TerminalOutput); output != "" {
